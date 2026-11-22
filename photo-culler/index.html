@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CullCraft</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<header>
+  <div class="brand">CullCraft</div>
+  <label class="btn primary">Open photos
+    <input id="fileInput" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden />
+  </label>
+  <label class="btn">Open folder
+    <input id="folderInput" type="file" webkitdirectory multiple hidden />
+  </label>
+  <label class="chk"><input id="faceToggle" type="checkbox" checked /> Eye detection</label>
+  <div class="spacer"></div>
+  <button id="applyStyle" class="btn" disabled title="Apply your learned style to all picks">Auto-edit picks</button>
+  <button id="exportBtn" class="btn primary" disabled>Export picks</button>
+</header>
+
+<div id="progress" hidden><div class="bar"></div><span class="label"></span></div>
+
+<nav id="filters">
+  <button data-f="all" class="active">All <span></span></button>
+  <button data-f="pick">Picks <span></span></button>
+  <button data-f="reject">Rejects <span></span></button>
+  <button data-f="dupe">Duplicates <span></span></button>
+  <button data-f="none">Unreviewed <span></span></button>
+  <div class="spacer"></div>
+  <span class="hint">←→ move · P pick · X reject · U clear · 1–5 stars · Enter open · C compare · Esc back</span>
+</nav>
+
+<main id="grid">
+  <div class="empty">
+    <h2>Drop a shoot here</h2>
+    <p>JPEG/PNG/WebP. Everything is analysed locally in your browser.</p>
+  </div>
+</main>
+
+<section id="loupe" hidden>
+  <div class="stage"><canvas id="mainCanvas"></canvas><canvas id="compareCanvas" hidden></canvas></div>
+  <aside>
+    <div id="meta"></div>
+    <h3>Edit</h3>
+    <div id="sliders"></div>
+    <div class="row">
+      <button id="autoBtn" class="btn">Auto</button>
+      <button id="resetBtn" class="btn">Reset</button>
+    </div>
+    <p class="small" id="styleInfo"></p>
+  </aside>
+</section>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
