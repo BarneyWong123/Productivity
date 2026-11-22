@@ -1,4 +1,5 @@
 // CullCraft — local AI photo culling + learned auto-editing.
+import { isRaw, rawToJpeg } from './raw.js';
 const $ = (s) => document.querySelector(s);
 const photos = [];      // {id,file,url,name,time,w,h,an:{...},flag,stars,group,edit,manual}
 let groups = [];        // arrays of photo ids
@@ -23,8 +24,8 @@ document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => { e.preventDefault(); load(e.dataTransfer.files); });
 
 async function load(fileList) {
-  const files = [...fileList].filter((f) => /image\/(jpeg|png|webp)/.test(f.type));
-  if (!files.length) return toast('No JPEG/PNG/WebP files found. (RAW files are not supported in the browser — export JPEG previews first.)');
+  const files = [...fileList].filter((f) => /image\/(jpeg|png|webp)/.test(f.type) || isRaw(f));
+  if (!files.length) return toast('No supported photos found. Use JPEG, PNG, WebP or RAW (ARW, NEF, CR2, DNG…).');
   photos.length = 0;
   const useFaces = $('#faceToggle').checked;
   if (useFaces && !faceLandmarker) await initFaces();
@@ -32,9 +33,11 @@ async function load(fileList) {
   for (let i = 0; i < files.length; i++) {
     const f = files[i];
     try {
-      const p = { id: i, file: f, name: f.name, url: URL.createObjectURL(f), flag: null, stars: 0, edit: null, manual: false };
-      p.an = await analyse(f, useFaces);
-      p.time = p.an.exifTime ?? f.lastModified;
+      let src = f, rawTime = null;
+      if (isRaw(f)) ({ blob: src, time: rawTime } = await rawToJpeg(f));
+      const p = { id: i, file: f, src, raw: isRaw(f), name: f.name, url: URL.createObjectURL(src), flag: null, stars: 0, edit: null, manual: false };
+      p.an = await analyse(src, useFaces);
+      p.time = rawTime ?? p.an.exifTime ?? f.lastModified;
       photos.push(p);
     } catch (err) { console.warn('skip', f.name, err); }
     showProgress(i + 1, files.length, 'Analysing');
@@ -325,7 +328,7 @@ function applyEdit(imgData, e) {
 }
 
 async function renderTo(canvas, p, maxDim) {
-  const bmp = await createImageBitmap(p.file);
+  const bmp = await createImageBitmap(p.src);
   const s = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
   canvas.width = Math.round(bmp.width * s); canvas.height = Math.round(bmp.height * s);
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
