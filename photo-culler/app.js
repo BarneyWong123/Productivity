@@ -21,10 +21,29 @@ const ZERO = () => Object.fromEntries(SLIDERS.map((s) => [s.k, 0]));
 $('#fileInput').onchange = (e) => load(e.target.files);
 $('#folderInput').onchange = (e) => load(e.target.files);
 document.addEventListener('dragover', (e) => e.preventDefault());
-document.addEventListener('drop', (e) => { e.preventDefault(); load(e.dataTransfer.files); });
+document.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  // Dropped folders arrive as directory entries, not files: walk them recursively.
+  const entries = [...e.dataTransfer.items].map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
+  if (!entries.some((en) => en.isDirectory)) return load(e.dataTransfer.files);
+  const out = [];
+  const walk = async (en) => {
+    if (en.isFile) out.push(await new Promise((res, rej) => en.file(res, rej)));
+    else if (en.isDirectory) {
+      const reader = en.createReader();
+      for (;;) {
+        const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+        if (!batch.length) break;
+        for (const b of batch) await walk(b);
+      }
+    }
+  };
+  for (const en of entries) await walk(en);
+  load(out);
+});
 
 async function load(fileList) {
-  const files = [...fileList].filter((f) => /image\/(jpeg|png|webp)/.test(f.type) || isRaw(f));
+  const files = [...fileList].filter((f) => /image\/(jpeg|png|webp)/.test(f.type) || /\.(jpe?g|png|webp)$/i.test(f.name) || isRaw(f));
   if (!files.length) return toast('No supported photos found. Use JPEG, PNG, WebP or RAW (ARW, NEF, CR2, DNG…).');
   photos.length = 0;
   const useFaces = $('#faceToggle').checked;
