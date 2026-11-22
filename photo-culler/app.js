@@ -1,444 +1,501 @@
-// CullCraft — local AI photo culling + learned auto-editing.
+// CullCraft — local AI photo culling and learned auto-editing.
 import { isRaw, rawToJpeg } from './raw.js';
+import { analyse, exifDate, initFaces, faceStatus } from './analyze.js';
+import { initClip, clipAnalyse, clipStatus } from './ai.js';
+import { cull, WEIGHTS } from './cull.js';
+import { SLIDERS, ZERO, autoParams, styled, learnFrom, styleInfo, resetStyle, applyEdit } from './edit.js';
+import { exportZip, csvReport, writeSidecars, canWriteFolder, download } from './export.js';
+import { sampleShoot } from './sample.js';
+
 const $ = (s) => document.querySelector(s);
-const photos = [];      // {id,file,url,name,time,w,h,an:{...},flag,stars,group,edit,manual}
-let groups = [];        // arrays of photo ids
-let filter = 'all', sel = 0, inLoupe = false, comparing = false;
-let faceLandmarker = null;
+const $$ = (s) => [...document.querySelectorAll(s)];
+const IMG_EXT = /\.(jpe?g|png|webp)$/i;
 
-const SLIDERS = [
-  { k: 'exposure',   label: 'Exposure',   min: -3,  max: 3,   step: 0.05 },
-  { k: 'contrast',   label: 'Contrast',   min: -1,  max: 1,   step: 0.01 },
-  { k: 'temp',       label: 'Temperature',min: -1,  max: 1,   step: 0.01 },
-  { k: 'tint',       label: 'Tint',       min: -1,  max: 1,   step: 0.01 },
-  { k: 'highlights', label: 'Highlights', min: -1,  max: 1,   step: 0.01 },
-  { k: 'shadows',    label: 'Shadows',    min: -1,  max: 1,   step: 0.01 },
-  { k: 'saturation', label: 'Saturation', min: -1,  max: 1,   step: 0.01 },
-];
-const ZERO = () => Object.fromEntries(SLIDERS.map((s) => [s.k, 0]));
+// ---------------- state ----------------
+class Photo {
+  constructor(id, file, src) {
+    Object.assign(this, { id, file, src, name: file.name, key: `${file.name}:${file.size}`, raw: isRaw(file) });
+    this.userFlag = undefined; this.userStars = undefined; this.edit = null; this.manual = false;
+  }
+  get flag() { return this.userFlag !== undefined ? this.userFlag : this.aiFlag; }
+  get stars() { return this.userStars ?? this.aiStars ?? 0; }
+}
+let photos = [], groups = [], analysing = false;
+const ui = { filter: 'all', reason: null, sel: null, loupe: false, compare: false, faces: true, before: false, tab: 'analysis' };
 
-// ---------------- loading & analysis ----------------
-$('#fileInput').onchange = (e) => load(e.target.files);
-$('#folderInput').onchange = (e) => load(e.target.files);
-document.addEventListener('dragover', (e) => e.preventDefault());
-document.addEventListener('drop', async (e) => {
-  e.preventDefault();
-  // Dropped folders arrive as directory entries, not files: walk them recursively.
+const SETTINGS_KEY = 'cullcraft.settings.v1';
+const settings = Object.assign(
+  { strictness: 0.5, similarity: 0.5, collapse: false, thumb: 200, faces: true, scene: true },
+  (() => { try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch { return {}; } })(),
+);
+const saveSettings = () => { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* blocked */ } };
+
+// ---------------- loading ----------------
+const pickFiles = (e) => { load(e.target.files); e.target.value = ''; };
+['#fileInput', '#folderInput', '#fileInput2', '#folderInput2'].forEach((s) => ($(s).onchange = pickFiles));
+$('#sampleBtn').onclick = async () => { toast('Generating sample shoot…'); load(await sampleShoot(), 'Sample shoot'); };
+
+let dragDepth = 0;
+addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth++; document.body.classList.add('dragging'); });
+addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('dragging'); } });
+addEventListener('dragover', (e) => e.preventDefault());
+addEventListener('drop', async (e) => {
+  e.preventDefault(); dragDepth = 0; document.body.classList.remove('dragging');
   const entries = [...e.dataTransfer.items].map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
   if (!entries.some((en) => en.isDirectory)) return load(e.dataTransfer.files);
   const out = [];
   const walk = async (en) => {
     if (en.isFile) out.push(await new Promise((res, rej) => en.file(res, rej)));
     else if (en.isDirectory) {
-      const reader = en.createReader();
-      for (;;) {
-        const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
-        if (!batch.length) break;
-        for (const b of batch) await walk(b);
-      }
+      const r = en.createReader();
+      for (;;) { const b = await new Promise((res, rej) => r.readEntries(res, rej)); if (!b.length) break; for (const x of b) await walk(x); }
     }
   };
   for (const en of entries) await walk(en);
-  load(out);
+  load(out, entries.length === 1 && entries[0].isDirectory ? entries[0].name : null);
 });
 
-async function load(fileList) {
-  const files = [...fileList].filter((f) => /image\/(jpeg|png|webp)/.test(f.type) || /\.(jpe?g|png|webp)$/i.test(f.name) || isRaw(f));
-  if (!files.length) return toast('No supported photos found. Use JPEG, PNG, WebP or RAW (ARW, NEF, CR2, DNG…).');
-  photos.length = 0;
-  const useFaces = $('#faceToggle').checked;
-  if (useFaces && !faceLandmarker) await initFaces();
-  showProgress(0, files.length, 'Analysing');
+async function load(list, name) {
+  if (analysing) return toast('Still analysing the current shoot. Wait for it to finish.');
+  let files = [...list].filter((f) => IMG_EXT.test(f.name) || /image\/(jpeg|png|webp)/.test(f.type) || isRaw(f));
+  // RAW+JPEG pairs: keep the RAW, skip its JPEG twin.
+  const stem = (f) => f.name.replace(/\.[^.]+$/, '').toLowerCase();
+  const raws = new Set(files.filter(isRaw).map(stem));
+  files = files.filter((f) => isRaw(f) || !raws.has(stem(f)));
+  if (!files.length) return toast('No photos found. CullCraft reads JPEG, PNG, WebP and RAW (ARW, NEF, CR2, DNG and more).');
+
+  analysing = true;
+  if (ui.loupe) closeLoupe();
+  photos.forEach((p) => URL.revokeObjectURL(p.thumbUrl));
+  cache.clear();
+  photos = []; groups = []; ui.sel = null; ui.reason = null; ui.filter = 'all';
+  const folder = name || files[0].webkitRelativePath?.split('/')[0] || 'Untitled shoot';
+  $('#shootName').textContent = folder;
+  $('#shootMeta').textContent = `${files.length} photos`;
+  $('#welcome').hidden = true;
+  $('#exportBtn').disabled = true;
+
+  progress('Loading AI models', 'downloaded once, then cached', 0);
+  if (settings.faces) { const pf = initFaces(); engineStatus(); await pf; }
+  if (settings.scene) { const pc = initClip((f, file) => progress('Downloading scene model', file || '', f)); engineStatus(); await pc; }
+  engineStatus();
+
+  const t0 = performance.now();
   for (let i = 0; i < files.length; i++) {
     const f = files[i];
+    const eta = i > 2 ? Math.round(((performance.now() - t0) / i) * (files.length - i) / 1000) : null;
+    progress(`Analysing ${i + 1} of ${files.length}`, `${f.name}${eta !== null ? ` · about ${fmtDur(eta)} left` : ''}`, i / files.length);
     try {
       let src = f, rawTime = null;
       if (isRaw(f)) ({ blob: src, time: rawTime } = await rawToJpeg(f));
-      const p = { id: i, file: f, src, raw: isRaw(f), name: f.name, url: URL.createObjectURL(src), flag: null, stars: 0, edit: null, manual: false };
-      p.an = await analyse(src, useFaces);
-      p.time = rawTime ?? p.an.exifTime ?? f.lastModified;
+      const p = new Photo(i, f, src);
+      p.an = await analyse(src, { faces: settings.faces && faceStatus() === 'ready' });
+      p.an.clip = settings.scene ? await clipAnalyse(src) : null;
+      p.time = rawTime ?? (await exifDate(f)) ?? f.lastModified;
+      p.thumbUrl = URL.createObjectURL(p.an.thumb);
       photos.push(p);
-    } catch (err) { console.warn('skip', f.name, err); }
-    showProgress(i + 1, files.length, 'Analysing');
+      if (photos.length % 12 === 1) renderPending();
+    } catch (err) { console.warn('Skipped', f.name, err); }
   }
   photos.sort((a, b) => a.time - b.time || a.name.localeCompare(b.name));
   photos.forEach((p, i) => (p.id = i));
-  cull();
+  analysing = false;
   hideProgress();
-  sel = 0;
-  $('#exportBtn').disabled = $('#applyStyle').disabled = false;
+  if (!photos.length) { $('#welcome').hidden = false; $('#grid').innerHTML = ''; return toast('None of those files could be read.'); }
+  const secs = Math.max(1, Math.round((performance.now() - t0) / 1000));
+  $('#shootMeta').textContent = `${photos.length} photos · analysed in ${fmtDur(secs)}`;
+  $('#exportBtn').disabled = false; $('#applyStyle').disabled = false;
+  groups = cull(photos, settings);
+  ui.sel = visible()[0]?.id ?? null;
   render();
+  const skipped = files.length - photos.length;
+  toast(`Culled ${photos.length} photos into ${groups.length} moments: ${countOf('pick')} picks.${skipped ? ` ${skipped} file(s) couldn't be read.` : ''}`);
+}
+const fmtDur = (s) => (s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`);
+
+function recull() {
+  if (!photos.length || analysing) return;
+  groups = cull(photos, settings);
+  render();
+  if (ui.loupe) drawLoupe();
 }
 
-async function initFaces() {
-  try {
-    showProgress(0, 1, 'Loading eye-detection model');
-    const v = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
-    const fs = await v.FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
-    faceLandmarker = await v.FaceLandmarker.createFromOptions(fs, {
-      baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task' },
-      runningMode: 'IMAGE', numFaces: 6, outputFaceBlendshapes: true,
+// ---------------- grid ----------------
+const countOf = (f) => photos.filter((p) => p.flag === f).length;
+function visible() {
+  let list = photos;
+  if (ui.filter !== 'all') list = list.filter((p) => p.flag === ui.filter);
+  if (ui.reason) list = list.filter((p) => p.issues.some((i) => i.k === ui.reason));
+  if (settings.collapse && ui.filter === 'all' && !ui.reason) {
+    list = groups.map((g) => {
+      const members = g.map((id) => photos[id]);
+      return members.find((p) => p.flag === 'pick') || [...members].sort((a, b) => b.score - a.score)[0];
     });
-  } catch (e) {
-    console.warn('Face model unavailable', e);
-    $('#faceToggle').checked = false;
   }
+  return list;
 }
+const starHtml = (n) => '★'.repeat(n) + `<span class="off">${'★'.repeat(5 - n)}</span>`;
+const FLAG_TEXT = { pick: 'Pick', dupe: 'Duplicate', reject: 'Reject' };
+const escHtml = (s) => s.replace(/[<>&"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
-async function analyse(file, useFaces) {
-  const full = await createImageBitmap(file);
-  const W = full.width, H = full.height;
-  const scale = Math.min(1, 640 / Math.max(W, H));
-  const w = Math.round(W * scale), h = Math.round(H * scale);
-  const c = new OffscreenCanvas(w, h), ctx = c.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(full, 0, 0, w, h);
-  const d = ctx.getImageData(0, 0, w, h).data;
-  const n = w * h, g = new Float32Array(n);
-  let sr = 0, sg = 0, sb = 0, sl = 0, hi = 0, lo = 0;
-  for (let i = 0, j = 0; j < n; i += 4, j++) {
-    const r = d[i], gr = d[i + 1], b = d[i + 2];
-    const l = 0.299 * r + 0.587 * gr + 0.114 * b;
-    g[j] = l; sr += r; sg += gr; sb += b; sl += l;
-    if (l > 250) hi++; else if (l < 5) lo++;
-  }
-  // Sharpness: variance of Laplacian; also take the max over a 4x4 tile grid so a
-  // sharp subject on a blurred background still scores as sharp.
-  const T = 4, tv = new Float64Array(T * T * 3);
-  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
-    const k = y * w + x;
-    const lap = 4 * g[k] - g[k - 1] - g[k + 1] - g[k - w] - g[k + w];
-    const t = (Math.floor((y * T) / h) * T + Math.floor((x * T) / w)) * 3;
-    tv[t] += lap; tv[t + 1] += lap * lap; tv[t + 2]++;
-  }
-  let totS = 0, totS2 = 0, totN = 0, tileMax = 0;
-  for (let t = 0; t < tv.length; t += 3) {
-    totS += tv[t]; totS2 += tv[t + 1]; totN += tv[t + 2];
-    const m = tv[t] / tv[t + 2]; tileMax = Math.max(tileMax, tv[t + 1] / tv[t + 2] - m * m);
-  }
-  const m = totS / totN, globalVar = totS2 / totN - m * m;
-  const sharp = Math.sqrt(0.4 * globalVar + 0.6 * tileMax);
-
-  // dHash (9x8)
-  const hc = new OffscreenCanvas(9, 8), hctx = hc.getContext('2d', { willReadFrequently: true });
-  hctx.drawImage(full, 0, 0, 9, 8);
-  const hd = hctx.getImageData(0, 0, 9, 8).data, bits = [];
-  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
-    const a = (y * 9 + x) * 4, b = a + 4;
-    bits.push(hd[a] + hd[a + 1] + hd[a + 2] < hd[b] + hd[b + 1] + hd[b + 2] ? 1 : 0);
-  }
-
-  // Faces / eyes
-  let faces = 0, closed = 0;
-  if (useFaces && faceLandmarker) {
-    try {
-      const res = faceLandmarker.detect(c);
-      faces = res.faceLandmarks.length;
-      for (const bs of res.faceBlendshapes || []) {
-        const get = (nm) => bs.categories.find((q) => q.categoryName === nm)?.score ?? 0;
-        if ((get('eyeBlinkLeft') + get('eyeBlinkRight')) / 2 > 0.5) closed++;
-      }
-    } catch (e) { console.warn(e); }
-  }
-  full.close();
-  return {
-    w: W, h: H, sharp, hash: bits,
-    mean: sl / n / 255, avg: [sr / n, sg / n, sb / n],
-    clipHi: hi / n, clipLo: lo / n, faces, closed,
-    exifTime: await exifDate(file),
-  };
+function cardHtml(p) {
+  const g = groups[p.group] || [];
+  const cls = ['card', p.flag || '', p.id === ui.sel ? 'sel' : '', p.userFlag !== undefined ? 'user' : ''].join(' ');
+  const why = p.flag === 'reject' ? p.issues.filter((i) => i.hard).map((i) => `<span>${i.t}</span>`).join('') : '';
+  return `<div class="${cls}" data-id="${p.id}">
+    <div class="ph" style="background-image:url('${p.thumbUrl}')"></div>
+    ${p.flag ? `<span class="flag">${FLAG_TEXT[p.flag]}</span>` : ''}
+    <span class="best" title="AI score out of 100">${Math.round(p.score * 100)}</span>
+    <div class="why">${why}</div>
+    <div class="meta"><span class="stars">${starHtml(p.stars)}</span>${g.length > 1 ? `<span title="Rank in stack">#${p.rankInGroup + 1}/${g.length}</span>` : ''}<span class="nm">${escHtml(p.name)}</span></div>
+  </div>`;
 }
-
-// Minimal EXIF DateTimeOriginal reader (JPEG only).
-async function exifDate(file) {
-  if (file.type !== 'image/jpeg') return null;
-  const buf = new DataView(await file.slice(0, 128 * 1024).arrayBuffer());
-  try {
-    let o = 2;
-    while (o < buf.byteLength - 4) {
-      const marker = buf.getUint16(o), len = buf.getUint16(o + 2);
-      if (marker === 0xffe1 && buf.getUint32(o + 4) === 0x45786966) {
-        const t = o + 10, le = buf.getUint16(t) === 0x4949;
-        const u16 = (p) => buf.getUint16(t + p, le), u32 = (p) => buf.getUint32(t + p, le);
-        const readIfd = (p) => {
-          const cnt = u16(p), out = {};
-          for (let i = 0; i < cnt; i++) { const e = p + 2 + i * 12; out[u16(e)] = u32(e + 8); }
-          return out;
-        };
-        const ifd0 = readIfd(u32(4));
-        const exif = ifd0[0x8769] ? readIfd(ifd0[0x8769]) : {};
-        const off = exif[0x9003] ?? ifd0[0x0132];
-        if (!off) return null;
-        let s = ''; for (let i = 0; i < 19; i++) s += String.fromCharCode(buf.getUint8(t + off + i));
-        const [dt, tm] = s.split(' ');
-        const ms = Date.parse(dt.replace(/:/g, '-') + 'T' + tm);
-        return isNaN(ms) ? null : ms;
-      }
-      o += 2 + len;
-    }
-  } catch { /* ignore */ }
-  return null;
-}
-
-// ---------------- culling ----------------
-const ham = (a, b) => a.reduce((s, v, i) => s + (v !== b[i]), 0);
-
-function cull() {
-  // Relative sharpness (percentile within this shoot)
-  const sorted = photos.map((p) => p.an.sharp).sort((a, b) => a - b);
-  const med = sorted[Math.floor(sorted.length / 2)] || 1;
-  for (const p of photos) {
-    const a = p.an;
-    a.sharpRel = sorted.findIndex((v) => v >= a.sharp) / Math.max(1, sorted.length - 1);
-    const expo = 1 - Math.min(1, Math.abs(a.mean - 0.47) * 2.2 + a.clipHi * 6 + a.clipLo * 4);
-    const eyes = a.faces ? 1 - a.closed / a.faces : 0.7;
-    const sharpAbs = Math.min(1, a.sharp / (med * 1.3));
-    a.score = 0.45 * (0.5 * sharpAbs + 0.5 * a.sharpRel) + 0.25 * expo + 0.3 * eyes;
-    a.issues = [];
-    if (a.sharp < med * 0.45) a.issues.push('blurry');
-    if (a.faces && a.closed) a.issues.push(`${a.closed}/${a.faces} eyes closed`);
-    if (a.clipHi > 0.12) a.issues.push('blown highlights');
-    if (a.mean < 0.12) a.issues.push('too dark');
-    p.stars = Math.max(1, Math.min(5, Math.round(a.score * 5)));
-  }
-  // Group: consecutive similar frames
-  groups = [];
-  let cur = [];
-  photos.forEach((p, i) => {
-    const prev = photos[i - 1];
-    const similar = prev && (ham(p.an.hash, prev.an.hash) <= 10 ||
-      (Math.abs(p.time - prev.time) < 3000 && ham(p.an.hash, prev.an.hash) <= 20));
-    if (!similar && cur.length) { groups.push(cur); cur = []; }
-    cur.push(p.id);
-  });
-  if (cur.length) groups.push(cur);
-  groups.forEach((g, gi) => {
-    g.forEach((id) => (photos[id].group = gi));
-    const best = g.map((id) => photos[id]).sort((a, b) => b.an.score - a.an.score)[0];
-    for (const id of g) {
-      const p = photos[id];
-      if (p.an.issues.some((s) => s === 'blurry' || s.includes('eyes'))) p.flag = 'reject';
-      else if (p === best) p.flag = 'pick';
-      else p.flag = 'dupe';
-    }
-    // Never leave a group with no pick if something is usable
-    if (!g.some((id) => photos[id].flag === 'pick') && best.an.issues.length === 0) best.flag = 'pick';
-  });
-}
-
-// ---------------- grid UI ----------------
-const visible = () => photos.filter((p) => filter === 'all' || (filter === 'none' ? !p.flag : p.flag === filter));
-const starStr = (n) => '★'.repeat(n) + '☆'.repeat(5 - n);
 
 function render() {
-  const counts = { all: photos.length, pick: 0, reject: 0, dupe: 0, none: 0 };
-  photos.forEach((p) => counts[p.flag || 'none']++);
-  document.querySelectorAll('#filters button').forEach((b) => {
-    b.classList.toggle('active', b.dataset.f === filter);
-    b.querySelector('span').textContent = counts[b.dataset.f];
-  });
-  const vis = visible();
-  sel = Math.min(sel, Math.max(0, vis.length - 1));
+  updateCounts();
   const grid = $('#grid');
-  if (!photos.length) return;
-  grid.innerHTML = '';
-  let lastG = -1, cards;
-  vis.forEach((p, i) => {
-    if (p.group !== lastG) {
+  if (!photos.length) { grid.innerHTML = ''; return; }
+  const vis = visible();
+  if (!vis.some((p) => p.id === ui.sel)) ui.sel = vis[0]?.id ?? null;
+  let html = '', lastG = -1, open = false;
+  const byStack = ui.filter === 'all' && !ui.reason && !settings.collapse;
+  if (!byStack) html += '<div class="cards">';
+  for (const p of vis) {
+    if (byStack && p.group !== lastG) {
+      if (open) html += '</div></div>';
       lastG = p.group;
-      const size = groups[p.group].length;
-      const g = document.createElement('div'); g.className = 'group';
-      g.innerHTML = `<h4>${size > 1 ? `Stack of ${size} similar` : 'Single'}</h4><div class="cards"></div>`;
-      grid.appendChild(g); cards = g.lastChild;
+      const g = groups[p.group];
+      const t = new Date(photos[g[0]].time);
+      html += `<div class="stack"><div class="stack-h"><strong>${g.length > 1 ? `Stack of ${g.length}` : 'Single'}</strong><span>${isNaN(t) ? '' : t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span><span class="line"></span></div><div class="cards">`;
+      open = true;
     }
-    const c = document.createElement('div');
-    c.className = `card ${p.flag || ''} ${i === sel ? 'sel' : ''}`;
-    const badges = [p.flag ? `<span class="badge ${p.flag}">${p.flag === 'dupe' ? 'duplicate' : p.flag}</span>` : '',
-      ...p.an.issues.map((s) => `<span class="badge">${s}</span>`), p.manual ? '<span class="badge">edited</span>' : ''].join('');
-    c.innerHTML = `<img loading="lazy" src="${p.url}"><div class="badges">${badges}</div>
-      <div class="info"><span class="stars">${starStr(p.stars)}</span><span>${p.name}</span></div>`;
-    c.onclick = () => { sel = i; render(); };
-    c.ondblclick = () => { sel = i; openLoupe(); };
-    cards.appendChild(c);
+    html += cardHtml(p);
+  }
+  html += byStack ? (open ? '</div></div>' : '') : '</div>';
+  if (!vis.length) html = '<p class="muted" style="text-align:center;margin-top:12vh">No photos match this filter.</p>';
+  grid.innerHTML = html;
+  scrollSel();
+}
+function renderPending() {
+  $('#grid').innerHTML = `<div class="cards">${photos.map((p) => `<div class="card pending"><div class="ph" style="background-image:url('${p.thumbUrl}')"></div><div class="meta"><span class="nm">${escHtml(p.name)}</span></div></div>`).join('')}</div>`;
+}
+function refreshCard(p) {
+  const el = $(`.card[data-id="${p.id}"]`);
+  if (el) el.outerHTML = cardHtml(p);
+  updateCounts();
+}
+function scrollSel() { $(`.card[data-id="${ui.sel}"]`)?.scrollIntoView({ block: 'nearest' }); }
+function select(id) {
+  const prev = ui.sel; ui.sel = id;
+  $(`.card[data-id="${prev}"]`)?.classList.remove('sel');
+  $(`.card[data-id="${id}"]`)?.classList.add('sel');
+  scrollSel();
+}
+$('#grid').addEventListener('click', (e) => { const c = e.target.closest('.card[data-id]'); if (c) select(+c.dataset.id); });
+$('#grid').addEventListener('dblclick', (e) => { const c = e.target.closest('.card[data-id]'); if (c) { select(+c.dataset.id); openLoupe(); } });
+
+function updateCounts() {
+  const n = photos.length, c = { pick: countOf('pick'), dupe: countOf('dupe'), reject: countOf('reject') };
+  $$('#filters button').forEach((b) => {
+    b.classList.toggle('on', b.dataset.f === ui.filter);
+    b.querySelector('b').textContent = !n ? '' : b.dataset.f === 'all' ? n : c[b.dataset.f];
   });
-  grid.querySelector('.sel')?.scrollIntoView({ block: 'nearest' });
+  $('#keepRate').textContent = n ? `${Math.round((c.pick / n) * 100)}%` : '—';
+  ['pick', 'dupe', 'reject'].forEach((k) => ($(`#overviewBar .${k}`).style.width = n ? `${(c[k] / n) * 100}%` : 0));
+  $('#legend').innerHTML = n ? [['pick', 'Picks'], ['dupe', 'Duplicates'], ['reject', 'Rejects']].map(([k, l]) => `<li><i class="dot ${k}"></i>${l}<b>${c[k]}</b></li>`).join('') : '';
+  const reasons = {};
+  for (const p of photos) if (p.flag !== 'pick') for (const i of p.issues) (reasons[i.k] ??= { t: i.t, n: 0 }).n++;
+  if (reasons.eyes) reasons.eyes.t = 'Eyes closed / blinking';
+  if (reasons.blur) reasons.blur.t = 'Out of focus / blurry';
+  const keys = Object.keys(reasons);
+  $('#reasons').innerHTML = keys.length
+    ? keys.sort((a, b) => reasons[b].n - reasons[a].n).map((k) => `<li data-r="${k}" class="${ui.reason === k ? 'on' : ''}">${reasons[k].t}<b>${reasons[k].n}</b></li>`).join('')
+    : `<li class="muted">${n ? 'No problems found' : 'Nothing yet'}</li>`;
+  const ns = styleInfo();
+  $('#styleText').textContent = ns
+    ? `Learned from ${ns} photo${ns > 1 ? 's' : ''} you edited by hand. Auto-edit applies it on top of exposure and white-balance correction.`
+    : 'Edit a few photos by hand and CullCraft learns your look, then applies it to every pick.';
+}
+$('#reasons').onclick = (e) => { const li = e.target.closest('li[data-r]'); if (!li) return; ui.reason = ui.reason === li.dataset.r ? null : li.dataset.r; ui.filter = 'all'; render(); };
+$$('#filters button').forEach((b) => (b.onclick = () => { ui.filter = b.dataset.f; ui.reason = null; render(); }));
+
+// ---------------- sidebar controls ----------------
+const pct = (v) => `${Math.round(v * 100)}%`;
+function bindRange(id, key, after) {
+  const el = $(`#${id}`), out = $(`#${id}Out`);
+  el.value = settings[key]; if (out) out.textContent = pct(settings[key]);
+  let t;
+  el.oninput = () => { settings[key] = +el.value; if (out) out.textContent = pct(settings[key]); saveSettings(); clearTimeout(t); t = setTimeout(after, 120); };
+}
+bindRange('strictness', 'strictness', recull);
+bindRange('similarity', 'similarity', recull);
+bindRange('thumbSize', 'thumb', () => document.documentElement.style.setProperty('--thumb', `${settings.thumb}px`));
+document.documentElement.style.setProperty('--thumb', `${settings.thumb}px`);
+$('#collapse').checked = settings.collapse;
+$('#collapse').onchange = (e) => { settings.collapse = e.target.checked; saveSettings(); render(); };
+$('#useFaces').checked = settings.faces;
+$('#useScene').checked = settings.scene;
+$('#useFaces').onchange = (e) => { settings.faces = e.target.checked; saveSettings(); engineStatus(); if (photos.length) toast('Applies to the next shoot you open.'); };
+$('#useScene').onchange = (e) => { settings.scene = e.target.checked; saveSettings(); engineStatus(); if (photos.length) toast('Applies to the next shoot you open.'); };
+function engineStatus() {
+  const label = { off: 'not loaded', loading: 'loading…', ready: 'ready', failed: 'unavailable' };
+  const set = (el, on, st) => { el.textContent = on ? label[st] : 'off'; el.className = `st ${on ? st : ''}`; el.title = st === 'failed' ? 'The model could not be downloaded. Check your internet connection and reload.' : ''; };
+  set($('#faceSt'), settings.faces, faceStatus());
+  set($('#sceneSt'), settings.scene, clipStatus());
+}
+engineStatus();
+$('#applyStyle').onclick = () => {
+  let n = 0;
+  for (const p of photos) if (p.flag === 'pick' && !p.manual) { p.edit = styled(p.an); n++; }
+  toast(`Edited ${n} pick${n === 1 ? '' : 's'}${styleInfo() ? ' in your style' : ' with auto-correction'}.`);
+  if (ui.loupe) drawLoupe();
+};
+$('#resetStyle').onclick = () => { resetStyle(); updateCounts(); toast('Learned style cleared.'); };
+
+// ---------------- flags ----------------
+function setFlag(p, f) {
+  p.userFlag = p.flag === f && p.userFlag !== undefined ? undefined : f;   // pressing again hands back to the AI decision
+  afterChange(p);
+}
+function setStars(p, n) { p.userStars = n; afterChange(p); }
+function afterChange(p) {
+  if (ui.loupe) { loupeHeader(p); drawStrip(p); inspector(p, true); }
+  else if (visible().some((q) => q.id === p.id)) refreshCard(p);
+  else render();
+  updateCounts();
 }
 
-document.querySelectorAll('#filters button').forEach((b) => (b.onclick = () => { filter = b.dataset.f; sel = 0; render(); }));
-
-document.addEventListener('keydown', (e) => {
-  if (e.target.type === 'range' || e.target.type === 'text') return;
-  const vis = visible(), p = vis[sel];
+// ---------------- keyboard ----------------
+addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { if (!$('#exportMenu').hidden) $('#exportMenu').hidden = true; else if (ui.loupe) closeLoupe(); return; }
+  if (e.target.matches('input[type=range], input[type=text]') || e.metaKey || e.ctrlKey || e.altKey) return;
+  const vis = visible(), idx = vis.findIndex((p) => p.id === ui.sel), p = vis[idx];
   if (!p) return;
-  const k = e.key.toLowerCase();
-  const move = (d) => { sel = Math.max(0, Math.min(vis.length - 1, sel + d)); };
-  if (k === 'arrowright') move(1);
-  else if (k === 'arrowleft') move(-1);
-  else if (k === 'arrowdown' && !inLoupe) move(colCount());
-  else if (k === 'arrowup' && !inLoupe) move(-colCount());
-  else if (k === 'p') { p.flag = 'pick'; if (!inLoupe && filter === 'all') move(1); }
-  else if (k === 'x') { p.flag = 'reject'; if (!inLoupe && filter === 'all') move(1); }
-  else if (k === 'u') p.flag = null;
-  else if (k >= '1' && k <= '5') p.stars = +k;
-  else if (k === 'enter' || k === ' ') { e.preventDefault(); inLoupe ? closeLoupe() : openLoupe(); return; }
-  else if (k === 'escape') { closeLoupe(); return; }
-  else if (k === 'c') { comparing = !comparing; if (!inLoupe) openLoupe(); else drawLoupe(); return; }
-  else return;
+  const go = (d) => { const n = vis[Math.max(0, Math.min(vis.length - 1, idx + d))]; if (n && n.id !== ui.sel) { select(n.id); if (ui.loupe) drawLoupe(); } };
+  switch (e.key.toLowerCase()) {
+    case 'arrowright': go(1); break;
+    case 'arrowleft': go(-1); break;
+    case 'arrowdown': if (ui.loupe) return; go(cols()); break;
+    case 'arrowup': if (ui.loupe) return; go(-cols()); break;
+    case 'p': setFlag(p, 'pick'); go(1); break;
+    case 'x': setFlag(p, 'reject'); go(1); break;
+    case 'd': setFlag(p, 'dupe'); go(1); break;
+    case 'u': p.userFlag = undefined; p.userStars = undefined; afterChange(p); break;
+    case '0': case '1': case '2': case '3': case '4': case '5': setStars(p, +e.key); break;
+    case 'enter': case ' ': ui.loupe ? closeLoupe() : openLoupe(); break;
+    case 'c': ui.compare = !ui.compare; ui.loupe ? drawLoupe() : openLoupe(); break;
+    case 'f': if (!ui.loupe) return; ui.faces = !ui.faces; drawOverlay(p); syncToggles(); break;
+    case 'e': if (!ui.loupe) openLoupe(); setTab(ui.tab === 'edit' ? 'analysis' : 'edit'); break;
+    case 'a': if (!ui.loupe) return; $('#autoBtn').click(); break;
+    case '\\': if (ui.loupe && !ui.before) { ui.before = true; paintMain(p); syncToggles(); } break;
+    default: return;
+  }
   e.preventDefault();
-  render();
-  if (inLoupe) drawLoupe();
 });
-function colCount() {
-  const c = document.querySelector('.cards');
-  return c ? getComputedStyle(c).gridTemplateColumns.split(' ').length : 1;
+addEventListener('keyup', (e) => { if (e.key === '\\' && ui.before) { ui.before = false; const p = photos[ui.sel]; if (p) paintMain(p); syncToggles(); } });
+function cols() { const c = $(`.card[data-id="${ui.sel}"]`)?.parentElement || $('.cards'); return c ? getComputedStyle(c).gridTemplateColumns.split(' ').length : 1; }
+
+// ---------------- loupe ----------------
+const cache = new Map();   // id -> {w,h,base:ImageData}
+async function preview(p) {
+  if (cache.has(p.id)) return cache.get(p.id);
+  const bmp = await createImageBitmap(p.src);
+  const s = Math.min(1, 2200 / Math.max(bmp.width, bmp.height));
+  const c = new OffscreenCanvas(Math.round(bmp.width * s), Math.round(bmp.height * s));
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(bmp, 0, 0, c.width, c.height); bmp.close();
+  const v = { w: c.width, h: c.height, base: ctx.getImageData(0, 0, c.width, c.height) };
+  cache.set(p.id, v);
+  if (cache.size > 8) cache.delete(cache.keys().next().value);
+  return v;
+}
+async function paint(canvas, p, withEdit) {
+  const v = await preview(p);
+  if (canvas.width !== v.w || canvas.height !== v.h) { canvas.width = v.w; canvas.height = v.h; }
+  const ctx = canvas.getContext('2d');
+  if (withEdit && p.edit) ctx.putImageData(applyEdit(new ImageData(new Uint8ClampedArray(v.base.data), v.w, v.h), p.edit), 0, 0);
+  else ctx.putImageData(v.base, 0, 0);
+}
+async function paintMain(p) { await paint($('#cMain'), p, !ui.before); placeOverlay(); drawOverlay(p); }
+
+function openLoupe() { if (ui.sel === null) return; ui.loupe = true; $('#loupe').hidden = false; drawLoupe(); }
+function closeLoupe() { ui.loupe = false; ui.compare = false; $('#loupe').hidden = true; render(); }
+$('#backBtn').onclick = closeLoupe;
+
+let drawSeq = 0;
+async function drawLoupe() {
+  const p = photos[ui.sel]; if (!p) return closeLoupe();
+  const seq = ++drawSeq;
+  loupeHeader(p); drawStrip(p); inspector(p); syncToggles();
+  const g = groups[p.group].map((id) => photos[id]);
+  const best = g.find((q) => q.flag === 'pick' && q !== p) || [...g].sort((a, b) => b.score - a.score).find((q) => q !== p);
+  const cmp = ui.compare && best;
+  $('#frameCmp').hidden = !cmp;
+  $('#frameMain figcaption').textContent = cmp ? `${p.name} · ${Math.round(p.score * 100)}` : '';
+  await paintMain(p);
+  if (cmp && seq === drawSeq) {
+    await paint($('#cCmp'), best, true);
+    $('#frameCmp figcaption').textContent = `${best.name} · ${Math.round(best.score * 100)} · ${FLAG_TEXT[best.flag] || ''}`;
+  }
+  if (ui.compare && !best) toast('This photo has no similar shots to compare with.');
+  placeOverlay();
+}
+function loupeHeader(p) {
+  const vis = visible(), i = vis.findIndex((q) => q.id === p.id);
+  $('#lName').textContent = p.name;
+  $('#lPos').textContent = `${i + 1} of ${vis.length} · moment ${p.group + 1} of ${groups.length}`;
+  $$('.flagbtn').forEach((b) => b.classList.toggle('on', p.flag === b.dataset.flag));
+  $('#lStars').innerHTML = [1, 2, 3, 4, 5].map((n) => `<span data-s="${n}" class="${n <= p.stars ? '' : 'off'}">★</span>`).join('');
+}
+$$('.flagbtn').forEach((b) => (b.onclick = () => setFlag(photos[ui.sel], b.dataset.flag)));
+$('#lStars').onclick = (e) => { const s = e.target.dataset.s; if (s) setStars(photos[ui.sel], +s); };
+function syncToggles() {
+  $('#togFaces').classList.toggle('on', ui.faces);
+  $('#togCompare').classList.toggle('on', ui.compare);
+  $('#togBefore').classList.toggle('on', ui.before);
+}
+$('#togFaces').onclick = () => { ui.faces = !ui.faces; drawOverlay(photos[ui.sel]); syncToggles(); };
+$('#togCompare').onclick = () => { ui.compare = !ui.compare; drawLoupe(); };
+$('#togBefore').onpointerdown = () => { ui.before = true; paintMain(photos[ui.sel]); syncToggles(); };
+$('#togBefore').onpointerup = $('#togBefore').onpointerleave = () => { if (ui.before) { ui.before = false; paintMain(photos[ui.sel]); syncToggles(); } };
+
+function drawStrip(p) {
+  const g = groups[p.group].map((id) => photos[id]);
+  $('#strip').hidden = g.length < 2;
+  $('#strip').innerHTML = g.map((q) => `<button data-id="${q.id}" class="${q.id === p.id ? 'on' : ''} ${q.flag || ''}" title="${escHtml(q.name)}"><img src="${q.thumbUrl}" alt=""><span>${q.flag === 'pick' ? '★ ' : ''}${Math.round(q.score * 100)}</span></button>`).join('');
+  $('#strip .on')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+$('#strip').onclick = (e) => { const b = e.target.closest('button[data-id]'); if (b) { ui.sel = +b.dataset.id; drawLoupe(); } };
+
+// The face overlay is positioned exactly over the drawn image.
+function placeOverlay() {
+  const c = $('#cMain'), svg = $('#faceOverlay'), fr = $('#frameMain').getBoundingClientRect(), r = c.getBoundingClientRect();
+  Object.assign(svg.style, { left: `${r.left - fr.left}px`, top: `${r.top - fr.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+}
+addEventListener('resize', () => ui.loupe && placeOverlay());
+function drawOverlay(p) {
+  const svg = $('#faceOverlay');
+  if (!p || !ui.faces || !p.an.faces.length) { svg.innerHTML = ''; return; }
+  const ns = 'vector-effect="non-scaling-stroke" fill="none"';
+  svg.innerHTML = p.an.faces.map((f) => {
+    const col = f.closed ? 'var(--reject)' : 'var(--pick)';
+    const [x0, y0, x1, y1] = f.box;
+    const eyes = f.eyes.map(([a, b, c, d]) => `<rect x="${a}" y="${b}" width="${c - a}" height="${Math.max(d - b, 0.004)}" stroke="${col}" stroke-width="2" ${ns}/>`).join('');
+    return `<rect x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}" stroke="${col}" stroke-opacity=".6" stroke-width="1.5" stroke-dasharray="5 4" ${ns}/>${eyes}`;
+  }).join('');
+}
+
+// ---------------- inspector ----------------
+function setTab(t) {
+  ui.tab = t;
+  $$('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === t));
+  $('#tabAnalysis').hidden = t !== 'analysis'; $('#tabEdit').hidden = t !== 'edit';
+}
+$$('.tabs button').forEach((b) => (b.onclick = () => setTab(b.dataset.tab)));
+
+const PART_LABEL = { sharp: 'Focus', aesthetic: 'Composition & appeal', eyes: 'Eyes open', exposure: 'Exposure', expression: 'Expression' };
+const meterColor = (v) => (v >= 0.66 ? 'var(--pick)' : v >= 0.4 ? 'var(--dupe)' : 'var(--reject)');
+function inspector(p, keepSliders) {
+  const g = groups[p.group];
+  $('#vScore').innerHTML = `${Math.round(p.score * 100)}<small>/100</small>`;
+  $('#ringVal').style.strokeDashoffset = 106.8 * (1 - p.score);
+  $('#ringVal').style.stroke = meterColor(p.score);
+  const verdict = p.flag === 'pick' ? (g.length > 1 ? `Best of ${g.length} similar shots` : 'Keeper')
+    : p.flag === 'dupe' ? `#${p.rankInGroup + 1} of ${g.length} similar shots`
+    : p.flag === 'reject' ? 'Rejected' : 'Not flagged';
+  $('#vText').textContent = verdict + (p.userFlag !== undefined ? ' · your call' : '');
+  $('#issues').innerHTML = p.issues.length ? p.issues.map((i) => `<span class="chip">${i.t}</span>`).join('') : '<span class="chip ok">No technical problems</span>';
+  $('#parts').innerHTML = Object.keys(PART_LABEL).map((k) => {
+    const v = p.parts[k];
+    const w = Math.round(WEIGHTS[k] * 100);
+    if (v === null) return `<div class="na"><dt>${PART_LABEL[k]}</dt><dd>${k === 'aesthetic' ? 'model off' : 'no faces'}</dd><div class="meter"></div></div>`;
+    return `<div title="${w}% of the overall score"><dt>${PART_LABEL[k]}</dt><dd>${Math.round(v * 100)}</dd><div class="meter"><i style="width:${v * 100}%;background:${meterColor(v)}"></i></div></div>`;
+  }).join('');
+  drawHist(p.an.hist);
+  $('#faceList').innerHTML = p.an.faces.length
+    ? p.an.faces.map((f, i) => `<div><b>${i + 1}</b><span class="${f.closed ? 'bad' : 'good'}">${f.closed ? 'Eyes closed' : 'Eyes open'}</span><span class="muted">${f.smile > 0.45 ? 'Smiling' : f.frown > 0.35 ? 'Frowning' : 'Neutral'}</span></div>`).join('')
+    : `<p class="fine">${faceStatus() === 'ready' ? 'No faces detected.' : 'Face analysis is off or unavailable.'}</p>`;
+  const t = new Date(p.time);
+  $('#fileInfo').innerHTML = [['Size', `${p.an.w} × ${p.an.h}`], ['Type', p.raw ? `RAW · ${p.name.split('.').pop().toUpperCase()}` : (p.file.type.replace('image/', '') || 'image').toUpperCase()],
+    ['Captured', isNaN(t) ? '—' : t.toLocaleString()], ['File size', `${(p.file.size / 1048576).toFixed(1)} MB`]].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  if (!keepSliders) sliders(p);
+}
+function drawHist(h) {
+  const c = $('#hist'), ctx = c.getContext('2d'), W = c.width, H = c.height, mx = Math.max(...h) || 1;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--muted');
+  ctx.globalAlpha = 0.6;
+  ctx.beginPath(); ctx.moveTo(0, H);
+  h.forEach((v, i) => ctx.lineTo((i / (h.length - 1)) * W, H - Math.sqrt(v / mx) * (H - 4)));
+  ctx.lineTo(W, H); ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1;
 }
 
 // ---------------- editing ----------------
-function autoParams(a) {
-  const [r, g, b] = a.avg, m = (r + g + b) / 3 || 1;
-  return {
-    ...ZERO(),
-    exposure: clamp(Math.log2(0.46 / Math.max(0.02, a.mean)) * 0.8, -2, 2),
-    temp: clamp((b - r) / m * 0.8, -0.6, 0.6),          // gray-world white balance
-    tint: clamp(((r + b) / 2 - g) / m * 0.8, -0.5, 0.5),
-    highlights: a.clipHi > 0.02 ? -clamp(a.clipHi * 6, 0, 0.6) : 0,
-    shadows: a.clipLo > 0.03 ? clamp(a.clipLo * 5, 0, 0.5) : 0,
-    contrast: 0.1, saturation: 0.05,
-  };
-}
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-
-// Learned style = average (manual - auto) over photos you edited by hand.
-function learnedStyle() {
-  const ed = photos.filter((p) => p.manual && p.edit);
-  if (!ed.length) return null;
-  const s = ZERO();
-  for (const p of ed) { const a = autoParams(p.an); for (const k in s) s[k] += (p.edit[k] - a[k]) / ed.length; }
-  return { style: s, n: ed.length };
-}
-function styledParams(p) {
-  const a = autoParams(p.an), L = learnedStyle();
-  if (L) for (const k in a) a[k] += L.style[k];
-  return a;
-}
-
-function applyEdit(imgData, e) {
-  const d = imgData.data;
-  const gain = 2 ** e.exposure;
-  const wb = [1 + e.temp * 0.25 - e.tint * 0.1, 1 + e.tint * 0.2, 1 - e.temp * 0.25 - e.tint * 0.1];
-  const luts = wb.map((w) => {
-    const lut = new Uint8ClampedArray(256);
-    for (let i = 0; i < 256; i++) {
-      let v = Math.pow(i / 255, 2.2) * gain * w;           // linear light
-      v = Math.pow(Math.max(0, v), 1 / 2.2);               // back to display
-      if (v > 0.5) v = 0.5 + (v - 0.5) * (1 + e.highlights * 0.8 * (v - 0.5) * 2); // highlights
-      else v = v + e.shadows * 0.5 * v * (1 - v * 2) * 2;  // shadows
-      v = 0.5 + (v - 0.5) * (1 + e.contrast);              // contrast
-      lut[i] = v * 255;
-    }
-    return lut;
-  });
-  const sat = 1 + e.saturation;
-  for (let i = 0; i < d.length; i += 4) {
-    let r = luts[0][d[i]], g = luts[1][d[i + 1]], b = luts[2][d[i + 2]];
-    if (sat !== 1) { const l = 0.299 * r + 0.587 * g + 0.114 * b; r = l + (r - l) * sat; g = l + (g - l) * sat; b = l + (b - l) * sat; }
-    d[i] = r; d[i + 1] = g; d[i + 2] = b;
-  }
-  return imgData;
-}
-
-async function renderTo(canvas, p, maxDim) {
-  const bmp = await createImageBitmap(p.src);
-  const s = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
-  canvas.width = Math.round(bmp.width * s); canvas.height = Math.round(bmp.height * s);
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
-  bmp.close();
-  if (p.edit) ctx.putImageData(applyEdit(ctx.getImageData(0, 0, canvas.width, canvas.height), p.edit), 0, 0);
-}
-
-// ---------------- loupe ----------------
-function openLoupe() { if (!visible().length) return; inLoupe = true; $('#loupe').hidden = false; drawLoupe(); }
-function closeLoupe() { inLoupe = false; comparing = false; $('#loupe').hidden = true; render(); }
-
-let drawToken = 0;
-async function drawLoupe() {
-  const tok = ++drawToken, p = visible()[sel];
-  if (!p) return closeLoupe();
-  const a = p.an;
-  $('#meta').innerHTML = [
-    ['File', p.name], ['Flag', p.flag || '—'], ['Rating', `<span class="stars">${starStr(p.stars)}</span>`],
-    ['AI score', (a.score * 100).toFixed(0)], ['Sharpness', `${(a.sharpRel * 100).toFixed(0)}th pct`],
-    ['Faces', a.faces ? `${a.faces} (${a.closed} closed)` : '—'], ['Issues', a.issues.join(', ') || 'none'],
-    ['Size', `${a.w}×${a.h}`],
-  ].map(([k, v]) => `<div><span>${k}</span><span>${v}</span></div>`).join('');
-  buildSliders(p);
-  const L = learnedStyle();
-  $('#styleInfo').textContent = L ? `Learned style from ${L.n} hand-edited photo(s). “Auto-edit picks” applies it.`
-    : 'Edit a few photos by hand — CullCraft learns your style and applies it to the rest.';
-  await renderTo($('#mainCanvas'), p, 1800);
-  const cmp = $('#compareCanvas');
-  const g = groups[p.group], other = g.find((id) => id !== p.id);
-  cmp.hidden = !(comparing && other !== undefined);
-  if (!cmp.hidden && tok === drawToken) await renderTo(cmp, photos[other], 1800);
-}
-
-function buildSliders(p) {
+const fmtVal = (s, v) => (s.fmt || ((x) => (x > 0 ? '+' : '') + Math.round(x * 100)))(v);
+function sliders(p) {
   const e = p.edit || ZERO();
-  $('#sliders').innerHTML = SLIDERS.map((s) => `<div class="slider"><label>${s.label}<span>${e[s.k].toFixed(2)}</span></label>
-    <input type="range" data-k="${s.k}" min="${s.min}" max="${s.max}" step="${s.step}" value="${e[s.k]}"></div>`).join('');
-  let pending;
-  $('#sliders').querySelectorAll('input').forEach((inp) => (inp.oninput = () => {
-    p.edit = p.edit || ZERO(); p.edit[inp.dataset.k] = +inp.value; p.manual = true;
-    inp.previousElementSibling.lastChild.textContent = (+inp.value).toFixed(2);
-    clearTimeout(pending); pending = setTimeout(() => renderTo($('#mainCanvas'), p, 1800), 60);
-  }));
+  $('#sliders').innerHTML = SLIDERS.map((s) => `<div class="slider ${e[s.k] ? 'changed' : ''}"><label for="sl-${s.k}">${s.label}<output data-k="${s.k}" title="Double-click to reset">${fmtVal(s, e[s.k])}</output></label>
+      <input id="sl-${s.k}" type="range" data-k="${s.k}" min="${s.min}" max="${s.max}" step="${s.step}" value="${e[s.k]}"></div>`).join('');
+  $('#editNote').textContent = p.manual ? 'Hand-edited. CullCraft learns your style from this photo.'
+    : p.edit ? 'Auto-edited. Adjust any slider and CullCraft will learn from it.' : 'Hold \\ (or the Original button) to compare with the unedited photo.';
 }
-$('#autoBtn').onclick = () => { const p = visible()[sel]; p.edit = styledParams(p); p.manual = false; drawLoupe(); };
-$('#resetBtn').onclick = () => { const p = visible()[sel]; p.edit = null; p.manual = false; drawLoupe(); };
-
-$('#applyStyle').onclick = () => {
-  let n = 0;
-  for (const p of photos) if (p.flag === 'pick' && !p.manual) { p.edit = styledParams(p); n++; }
-  toast(`Auto-edited ${n} pick(s)${learnedStyle() ? ' using your learned style' : ''}.`);
-  if (inLoupe) drawLoupe();
+let paintRaf, learnT;
+$('#sliders').addEventListener('input', (e) => {
+  const p = photos[ui.sel], k = e.target.dataset.k; if (!p || !k) return;
+  p.edit = p.edit || ZERO(); p.edit[k] = +e.target.value; p.manual = true;
+  e.target.parentElement.querySelector('output').textContent = fmtVal(SLIDERS.find((x) => x.k === k), p.edit[k]);
+  e.target.parentElement.classList.toggle('changed', p.edit[k] !== 0);
+  cancelAnimationFrame(paintRaf); paintRaf = requestAnimationFrame(() => paint($('#cMain'), p, true));
+  clearTimeout(learnT); learnT = setTimeout(() => { learnFrom(p); updateCounts(); $('#editNote').textContent = 'Hand-edited. CullCraft learns your style from this photo.'; }, 600);
+});
+$('#sliders').addEventListener('dblclick', (e) => {
+  const k = e.target.dataset.k, p = photos[ui.sel]; if (!k || !p?.edit) return;
+  p.edit[k] = 0; sliders(p); paint($('#cMain'), p, true);
+});
+$('#autoBtn').onclick = () => { const p = photos[ui.sel]; p.edit = autoParams(p.an); p.manual = false; sliders(p); paintMain(p); };
+$('#styleBtn').onclick = () => {
+  const p = photos[ui.sel]; p.edit = styled(p.an); p.manual = false; sliders(p); paintMain(p);
+  if (!styleInfo()) toast('No style learned yet, so this is plain auto-correction. Edit a photo by hand first.');
 };
+$('#resetBtn').onclick = () => { const p = photos[ui.sel]; p.edit = null; p.manual = false; sliders(p); paintMain(p); };
 
 // ---------------- export ----------------
-$('#exportBtn').onclick = async () => {
-  const picks = photos.filter((p) => p.flag === 'pick');
-  if (!picks.length) return toast('No picks to export.');
-  const zip = new JSZip(), c = document.createElement('canvas');
-  const csv = ['file,flag,stars,score,issues'];
-  for (const p of photos) csv.push(`"${p.name}",${p.flag || ''},${p.stars},${p.an.score.toFixed(3)},"${p.an.issues.join('; ')}"`);
-  zip.file('culling-report.csv', csv.join('\n'));
-  for (let i = 0; i < picks.length; i++) {
-    showProgress(i, picks.length, 'Exporting');
-    const p = picks[i];
-    if (p.edit) {
-      await renderTo(c, p, 100000);
-      const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.95));
-      zip.file(p.name.replace(/\.\w+$/, '') + '_edit.jpg', blob);
-    } else zip.file(p.name, p.file);
+$('#exportBtn').onclick = (e) => {
+  e.stopPropagation();
+  $('#exportMenu').hidden = !$('#exportMenu').hidden;
+  $('#exportMenu [data-x=folder]').disabled = !canWriteFolder();
+};
+addEventListener('click', (e) => { if (!e.target.closest('.menu-wrap')) $('#exportMenu').hidden = true; });
+$('#exportMenu').onclick = async (e) => {
+  const b = e.target.closest('button[data-x]'); if (!b) return;
+  $('#exportMenu').hidden = true;
+  try {
+    if (b.dataset.x === 'csv') download(new Blob([csvReport(photos)], { type: 'text/csv' }), 'cullcraft-report.csv');
+    else if (b.dataset.x === 'folder') {
+      const n = await writeSidecars(photos);
+      toast(`Wrote ${n} .xmp sidecars. In Lightroom select the photos, then Metadata → Read Metadata from Files.`);
+    } else {
+      const full = b.dataset.x === 'zip';
+      const blob = await exportZip(photos, { includeFiles: full, onProgress: (i, n) => progress(full ? 'Exporting picks' : 'Writing sidecars', '', i / n) });
+      hideProgress();
+      download(blob, full ? 'cullcraft-picks.zip' : 'cullcraft-sidecars.zip');
+      toast(full ? `Exported ${countOf('pick')} picks with Lightroom sidecars.` : 'Sidecars exported. Put the .xmp files next to your originals.');
+    }
+  } catch (err) {
+    hideProgress();
+    if (err.name !== 'AbortError') toast(`Export failed: ${err.message}`);
   }
-  showProgress(picks.length, picks.length, 'Zipping');
-  const out = await zip.generateAsync({ type: 'blob' });
-  hideProgress();
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(out); a.download = 'cullcraft-picks.zip'; a.click();
 };
 
-// ---------------- progress ----------------
-function showProgress(i, n, label) {
+// ---------------- progress & toast ----------------
+function progress(label, detail, f) {
   $('#progress').hidden = false;
-  $('#progress .bar').style.width = `${(i / n) * 100}%`;
-  $('#progress .label').textContent = `${label} ${i}/${n}`;
+  $('#pLabel').textContent = label; $('#pDetail').textContent = detail;
+  $('#pBar').style.width = `${Math.round(f * 100)}%`;
 }
 function hideProgress() { $('#progress').hidden = true; }
-
-// In-page message (browser alert() dialogs are blocked in some embeds).
 function toast(msg) {
-  let t = document.getElementById('toast');
-  if (!t) { t = document.createElement('div'); t.id = 'toast'; document.body.appendChild(t); }
-  t.textContent = msg; t.hidden = false;
-  clearTimeout(toast.h); toast.h = setTimeout(() => (t.hidden = true), 4000);
+  const t = $('#toast'); t.textContent = msg; t.hidden = false;
+  clearTimeout(toast.h); toast.h = setTimeout(() => (t.hidden = true), 5000);
 }
+updateCounts();
