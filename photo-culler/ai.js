@@ -1,7 +1,8 @@
 // Scene understanding with CLIP (runs locally via transformers.js / ONNX Runtime Web).
 // Gives each photo: an aesthetic score (zero-shot against quality prompts) and an
 // embedding used to group shots of the same moment even when framing changes.
-const TJS = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2';
+// Overridable so the models can be self-hosted (set window.CULLCRAFT_TJS / CULLCRAFT_MODEL_HOST before loading).
+const TJS = globalThis.CULLCRAFT_TJS || 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2';
 const MODEL = 'Xenova/clip-vit-base-patch32';
 
 const GOOD = [
@@ -27,14 +28,17 @@ export async function initClip(onProgress) {
   try {
     const T = await import(`${TJS}/dist/transformers.min.js`);
     T.env.allowLocalModels = false;
-    const opts = { dtype: 'q8', progress_callback: (p) => p.status === 'progress' && onProgress?.(p.progress / 100, p.file) };
+    if (globalThis.CULLCRAFT_MODEL_HOST) T.env.remoteHost = globalThis.CULLCRAFT_MODEL_HOST;
+    if (globalThis.CULLCRAFT_TJS) T.env.backends.onnx.wasm.wasmPaths = `${TJS}/dist/`;
+    // A fresh options object per model: from_pretrained writes the model file name into it.
+    const opts = () => ({ dtype: 'q8', progress_callback: (p) => p.status === 'progress' && onProgress?.(p.progress / 100, p.file) });
     const [tok, textModel] = await Promise.all([
       T.AutoTokenizer.from_pretrained(MODEL),
-      T.CLIPTextModelWithProjection.from_pretrained(MODEL, opts),
+      T.CLIPTextModelWithProjection.from_pretrained(MODEL, opts()),
     ]);
     [processor, vision] = await Promise.all([
       T.AutoProcessor.from_pretrained(MODEL),
-      T.CLIPVisionModelWithProjection.from_pretrained(MODEL, opts),
+      T.CLIPVisionModelWithProjection.from_pretrained(MODEL, opts()),
     ]);
     const inputs = tok([...GOOD, ...BAD], { padding: true, truncation: true });
     const { text_embeds } = await textModel(inputs);

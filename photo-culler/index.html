@@ -24,7 +24,9 @@
     <button data-f="pick"><i class="dot pick"></i>Picks <b></b></button>
     <button data-f="dupe"><i class="dot dupe"></i>Duplicates <b></b></button>
     <button data-f="reject"><i class="dot reject"></i>Rejects <b></b></button>
+    <button data-f="highlight"><i class="dot hl"></i>Highlights <b></b></button>
   </nav>
+  <span id="saveState" class="save"></span>
   <div class="actions">
     <label class="btn ghost" title="Open photos">
       <svg viewBox="0 0 20 20"><path d="M3 5h5l2 2h7v9H3z" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
@@ -57,6 +59,7 @@
     </section>
     <section>
       <h3>Culling</h3>
+      <div class="field"><label for="genre">Shoot type</label><select id="genre"></select></div>
       <div class="ctl">
         <label for="strictness">Strictness <output id="strictnessOut"></output></label>
         <input id="strictness" type="range" min="0" max="1" step="0.05" />
@@ -68,6 +71,12 @@
         <div class="ends"><span>Near-identical</span><span>Same moment</span></div>
       </div>
       <label class="check"><input id="collapse" type="checkbox" /> Show only the best of each stack</label>
+      <label class="check" title="Keep a slightly soft frame when someone is laughing or crying"><input id="protect" type="checkbox" /> Protect emotional moments</label>
+      <label class="check">New scene after <input id="sceneGap" type="number" min="1" max="120" class="num" /> min gap</label>
+    </section>
+    <section>
+      <h3>Scenes</h3>
+      <ul class="scenes" id="scenes"></ul>
     </section>
     <section>
       <h3>Why photos were flagged</h3>
@@ -115,6 +124,16 @@
       <div class="ptext"><strong id="pLabel"></strong><span id="pDetail" class="muted"></span></div>
       <div class="ptrack"><i id="pBar"></i></div>
     </div>
+    <div id="filterbar" class="filterbar" hidden>
+      <label>Rating <select id="fb-rating"><option value="any">Any</option><option value=">5">★★★★★</option><option value=">4">★★★★ and up</option><option value=">3">★★★ and up</option><option value=">2">★★ and up</option><option value="<2">★★ and below</option><option value="rated">Rated by you</option><option value="unrated">Not rated by you</option></select></label>
+      <label>Edited <select id="fb-edited"><option value="any">Any</option><option value="yes">Edited</option><option value="hand">Hand-edited</option><option value="no">Not edited</option></select></label>
+      <label>People <select id="fb-people"><option value="any">Any</option><option value="0">No people</option><option value="1">1 or more</option><option value="2">2 or more</option><option value="3">Groups (3+)</option></select></label>
+      <label>Decided by <select id="fb-by"><option value="any">Anyone</option><option value="you">You</option><option value="ai">AI</option><option value="review">AI close-call review</option></select></label>
+      <label>Problem <select id="fb-reason"><option value="">Any problem</option></select></label>
+      <label>Sort <select id="fb-sort"><option value="time">Capture time</option><option value="score">AI score</option><option value="stars">Rating</option><option value="name">File name</option></select></label>
+      <button id="fbClear" class="btn small ghost" hidden>Clear filters</button>
+      <span id="fbCount" class="muted"></span>
+    </div>
     <div id="grid" class="grid"></div>
     <section id="welcome" class="welcome">
       <div class="drop" id="drop">
@@ -148,7 +167,9 @@
     </div>
     <div class="ltoggles">
       <button class="tog" id="togFaces" title="Show face and eye analysis (F)">Faces <kbd>F</kbd></button>
+      <button class="tog" id="togSurvey" title="All frames of this moment side by side (S)">Survey <kbd>S</kbd></button>
       <button class="tog" id="togCompare" title="Compare with best of stack (C)">Compare <kbd>C</kbd></button>
+      <button class="tog" id="togFull" title="Full screen (Shift+F, or double-click the photo)">Full screen</button>
       <button class="tog" id="togBefore" title="Hold \ to see the original">Original <kbd>\</kbd></button>
     </div>
   </div>
@@ -156,6 +177,8 @@
     <div class="stagecol">
       <div class="stage" id="stage">
         <figure class="frame" id="frameMain"><canvas id="cMain"></canvas><svg id="faceOverlay" viewBox="0 0 1 1" preserveAspectRatio="none"></svg><figcaption></figcaption></figure>
+        <div id="survey" class="survey" hidden></div>
+        <div id="zoomView" class="zoomview" hidden><canvas id="cZoom"></canvas><span id="zoomInfo"></span></div>
         <figure class="frame" id="frameCmp" hidden><canvas id="cCmp"></canvas><figcaption></figcaption></figure>
       </div>
       <div class="strip" id="strip"></div>
@@ -172,13 +195,17 @@
         <dl id="parts" class="parts"></dl>
         <h4>Histogram</h4>
         <canvas id="hist" width="260" height="70"></canvas>
-        <h4>Faces</h4>
-        <div id="faceList" class="facelist"></div>
+        <h4>Key faces <small class="muted">click to check focus at 100%</small></h4>
+        <div id="keyFaces" class="keyfaces"></div>
         <h4>File</h4>
         <dl id="fileInfo" class="kv"></dl>
       </div>
       <div id="tabEdit" class="tab" hidden>
         <div class="row"><button id="autoBtn" class="btn small">Auto <kbd>A</kbd></button><button id="styleBtn" class="btn small">My style</button><button id="resetBtn" class="btn small ghost">Reset</button></div>
+        <h4>Looks</h4>
+        <div id="looks" class="looks"></div>
+        <div class="row" style="margin-top:10px"><button id="copyBtn" class="btn small ghost">Copy settings <kbd>⌘C</kbd></button><button id="pasteBtn" class="btn small ghost">Paste <kbd>⌘V</kbd></button></div>
+        <h4>Adjust</h4>
         <div id="sliders"></div>
         <p class="fine" id="editNote"></p>
       </div>
@@ -186,6 +213,15 @@
   </div>
 </section>
 
+<div id="batchbar" class="batchbar" hidden>
+  <strong id="bbCount"></strong>
+  <button data-b="pick" class="flagbtn pick">Pick</button><button data-b="reject" class="flagbtn reject">Reject</button><button data-b="dupe" class="flagbtn">Duplicate</button>
+  <span class="bbstars"><button data-b="s1">1★</button><button data-b="s2">2★</button><button data-b="s3">3★</button><button data-b="s4">4★</button><button data-b="s5">5★</button></span>
+  <select id="bbLook"></select>
+  <button data-b="paste" class="btn small ghost">Paste edit</button>
+  <button data-b="clear" class="btn small ghost" title="Return to the AI's decisions">Reset to AI</button>
+  <button data-b="none" class="btn small ghost">Done</button>
+</div>
 <div id="toast" class="toast" role="status" hidden></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>

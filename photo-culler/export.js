@@ -21,7 +21,7 @@ export function xmpFor(p) {
    xmlns:xmp="http://ns.adobe.com/xap/1.0/"
    xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
 ${body}>
-   <dc:subject xmlns:dc="http://purl.org/dc/elements/1.1/"><rdf:Bag>${p.issues.map((i) => `<rdf:li>${esc(i.t)}</rdf:li>`).join('')}</rdf:Bag></dc:subject>
+   <dc:subject xmlns:dc="http://purl.org/dc/elements/1.1/"><rdf:Bag>${p.highlight && p.flag === 'pick' ? '<rdf:li>Highlight</rdf:li>' : ''}<rdf:li>CullCraft scene ${(p.scene ?? 0) + 1}</rdf:li>${p.issues.map((i) => `<rdf:li>${esc(i.t)}</rdf:li>`).join('')}</rdf:Bag></dc:subject>
   </rdf:Description>
  </rdf:RDF>
 </x:xmpmeta>
@@ -29,9 +29,9 @@ ${body}>
 }
 
 export function csvReport(photos) {
-  const rows = [['file', 'decision', 'stars', 'score', 'sharpness', 'eyes', 'exposure', 'expression', 'aesthetic', 'stack', 'issues']];
+  const rows = [['file', 'decision', 'highlight', 'stars', 'score', 'sharpness', 'eyes', 'people', 'exposure', 'expression', 'aesthetic', 'scene', 'stack', 'issues']];
   const f = (v) => (v === null || v === undefined ? '' : (+v).toFixed(2));
-  for (const p of photos) rows.push([p.name, p.flag || '', p.stars, f(p.score), f(p.parts.sharp), f(p.parts.eyes), f(p.parts.exposure), f(p.parts.expression), f(p.parts.aesthetic), p.group + 1, p.issues.map((i) => i.t).join('; ')]);
+  for (const p of photos) rows.push([p.name, p.flag || '', p.highlight && p.flag === 'pick' ? 'yes' : '', p.stars, f(p.score), f(p.parts.sharp), f(p.parts.eyes), f(p.parts.people), f(p.parts.exposure), f(p.parts.expression), f(p.parts.aesthetic), (p.scene ?? 0) + 1, p.group + 1, p.issues.map((i) => i.t).join('; ')]);
   return rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
 }
 

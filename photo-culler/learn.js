@@ -4,11 +4,11 @@
 // so a handful of decisions nudges the scoring instead of overturning it.
 import { DEFAULT_WEIGHTS } from './cull.js';
 
-const KEY = 'cullcraft.decisions.v1';
+const KEY = 'cullcraft.decisions.v2';
 const FEATURES = Object.keys(DEFAULT_WEIGHTS);
 const MAX = 3000;
 let samples = loadSamples();
-function loadSamples() { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch { return []; } }
+function loadSamples() { try { return (JSON.parse(localStorage.getItem(KEY)) || []).filter((s) => s.x?.length === FEATURES.length); } catch { return []; } }
 function save() { try { localStorage.setItem(KEY, JSON.stringify(samples.slice(-MAX))); } catch { /* storage blocked */ } }
 
 const vec = (parts) => FEATURES.map((k) => (parts[k] === null || parts[k] === undefined ? 0.5 : parts[k]));
@@ -27,13 +27,14 @@ export function recordDecision(photo) {
 export const decisionCount = () => samples.length;
 export function forgetDecisions() { samples = []; save(); cached = null; }
 
-let cached = null;
+let cached = null, cachedPrior = null;
 // Returns weights (summing to 1) or null when there isn't enough signal yet.
-export function learnedWeights() {
+export function learnedWeights(prior_weights = DEFAULT_WEIGHTS) {
+  if (cachedPrior !== prior_weights) { cached = null; cachedPrior = prior_weights; }
   if (cached !== undefined && cached !== null) return cached;
   const pos = samples.filter((s) => s.y === 1).length, neg = samples.length - pos;
   if (pos < 3 || neg < 3) return (cached = null);
-  const prior = FEATURES.map((k) => DEFAULT_WEIGHTS[k] * 8);   // prior in logit space
+  const prior = FEATURES.map((k) => prior_weights[k] * 8);   // prior in logit space
   let w = [...prior], b = -0.5 * prior.reduce((a, c) => a + c, 0);
   const lr = 0.5, lambda = 4 / samples.length;
   for (let it = 0; it < 400; it++) {
@@ -52,6 +53,6 @@ export function learnedWeights() {
   cached = Object.fromEntries(FEATURES.map((k, i) => [k, pos_w[i] / sum]));
   // Blend toward defaults until there are plenty of decisions.
   const trust = Math.min(1, samples.length / 60);
-  for (const k of FEATURES) cached[k] = trust * cached[k] + (1 - trust) * DEFAULT_WEIGHTS[k];
+  for (const k of FEATURES) cached[k] = trust * cached[k] + (1 - trust) * prior_weights[k];
   return cached;
 }

@@ -95,3 +95,21 @@ export function toCrs(e) {
     'crs:Vibrance': r(e.vibrance), 'crs:Saturation': r(e.saturation),
   };
 }
+
+// Built-in looks: applied on top of per-photo auto-correction (and your learned style),
+// so one look adapts to each frame's exposure and white balance instead of pasting fixed numbers.
+export const LOOKS = {
+  natural: { label: 'Natural', hint: 'Clean, true-to-life correction', swatch: 'linear-gradient(135deg,#c9b8a0,#7d8b6a)', d: {} },
+  airy: { label: 'Bright & airy', hint: 'Lifted shadows, soft contrast, gentle warmth', swatch: 'linear-gradient(135deg,#fff6ea,#e9d9c9)', d: { exposure: 0.35, contrast: -0.18, highlights: -0.35, shadows: 0.35, temp: 0.08, vibrance: 0.1, saturation: -0.08 } },
+  moody: { label: 'Dark & moody', hint: 'Deeper shadows, muted colour', swatch: 'linear-gradient(135deg,#3b3a36,#6b5a48)', d: { exposure: -0.25, contrast: 0.28, highlights: -0.3, shadows: -0.2, temp: 0.04, saturation: -0.25, vibrance: -0.05 } },
+  film: { label: 'Warm film', hint: 'Warm, soft highlights, gentle fade', swatch: 'linear-gradient(135deg,#e7b57b,#9c6b4a)', d: { temp: 0.22, tint: 0.05, contrast: 0.1, highlights: -0.3, shadows: 0.18, saturation: -0.12, vibrance: 0.12 } },
+  vivid: { label: 'Vivid', hint: 'Punchy colour and contrast for events and travel', swatch: 'linear-gradient(135deg,#ff7a59,#3b82f6)', d: { contrast: 0.25, vibrance: 0.35, saturation: 0.08, highlights: -0.15, shadows: 0.1 } },
+  bw: { label: 'Classic B&W', hint: 'Black and white with rich contrast', swatch: 'linear-gradient(135deg,#f2f2f2,#222)', d: { saturation: -1, vibrance: 0, contrast: 0.3, highlights: -0.2, shadows: 0.1 } },
+};
+export function applyLook(a, key, styledFn) {
+  const base = styledFn ? styledFn(a) : autoParams(a);
+  const d = LOOKS[key].d;
+  for (const k in d) base[k] = k === 'saturation' && d[k] === -1 ? -1 : base[k] + d[k];
+  if (key === 'bw') { base.vibrance = 0; base.temp = 0; base.tint = 0; }
+  return base;
+}
