@@ -5,10 +5,14 @@ const median = (a) => { const s = a.filter((v) => v > 0).sort((x, y) => x - y); 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 const ham = (a, b) => { let s = 0; for (let i = 0; i < 64; i++) s += a[i] !== b[i]; return s; };
 
-export const WEIGHTS = { sharp: 0.32, aesthetic: 0.24, eyes: 0.2, exposure: 0.14, expression: 0.1 };
+export const DEFAULT_WEIGHTS = { sharp: 0.32, aesthetic: 0.24, eyes: 0.2, exposure: 0.14, expression: 0.1 };
 
 // settings: { strictness 0..1, similarity 0..1 }
-export function cull(photos, settings) {
+export let WEIGHTS = DEFAULT_WEIGHTS;
+
+// weights: learned from your decisions (learn.js) or null for defaults.
+export function cull(photos, settings, weights) {
+  WEIGHTS = weights || DEFAULT_WEIGHTS;
   const strict = settings.strictness, sim = settings.similarity;
   const eyeMed = median(photos.flatMap((p) => p.an.faces.map((f) => f.eyeSharp / Math.sqrt(f.size))));
   const tileMed = median(photos.map((p) => p.an.tileSharp));
@@ -67,7 +71,8 @@ export function cull(photos, settings) {
       p.group = gi; p.rankInGroup = r;
       p.aiFlag = p.issues.some((x) => x.hard) ? 'reject' : 'dupe';
     });
-    const best = ranked.find((p) => p.aiFlag !== 'reject');
+    // A close-call verdict from the optional AI reviewer overrides the score ranking.
+    const best = ranked.find((p) => p.reviewPick && p.aiFlag !== 'reject') || ranked.find((p) => p.aiFlag !== 'reject');
     if (best) best.aiFlag = 'pick';
     // Lenient mode keeps a close runner-up in big stacks.
     if (strict < 0.3 && ranked.length >= 4) {

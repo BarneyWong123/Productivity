@@ -82,6 +82,21 @@
       <p class="fine">Models download once (~95&nbsp;MB) and run on this computer. Photos never leave it.</p>
     </section>
     <section>
+      <h3>Learns your taste</h3>
+      <p class="fine" id="learnText"></p>
+      <div class="row" style="margin-top:8px">
+        <button id="relearn" class="btn small">Re-cull with my taste</button>
+        <button id="forgetLearn" class="btn small ghost">Forget</button>
+      </div>
+    </section>
+    <section>
+      <h3>AI review of close calls <span class="opt">optional</span></h3>
+      <p class="fine">When the top frames of a stack score within a few points, a vision model picks the winner. Only those frames are sent, as small previews, using your own OpenRouter key.</p>
+      <div class="field"><label for="orKey">OpenRouter API key</label><input id="orKey" type="password" placeholder="sk-or-…" autocomplete="off" /></div>
+      <div class="field"><label for="orModel">Model</label><input id="orModel" type="text" spellcheck="false" /></div>
+      <button id="reviewBtn" class="btn small" disabled>Review close calls</button>
+    </section>
+    <section>
       <h3>Your editing style</h3>
       <p class="fine" id="styleText"></p>
       <div class="row">
@@ -152,6 +167,7 @@
           <svg class="ring" viewBox="0 0 40 40"><circle cx="20" cy="20" r="17" class="track"/><circle id="ringVal" cx="20" cy="20" r="17" class="val"/></svg>
           <div><div id="vScore" class="vscore"></div><div id="vText" class="vtext"></div></div>
         </div>
+        <p id="reviewNote" class="note" hidden></p>
         <div id="issues" class="chips"></div>
         <dl id="parts" class="parts"></dl>
         <h4>Histogram</h4>

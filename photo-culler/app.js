@@ -6,6 +6,8 @@ import { cull, WEIGHTS } from './cull.js';
 import { SLIDERS, ZERO, autoParams, styled, learnFrom, styleInfo, resetStyle, applyEdit } from './edit.js';
 import { exportZip, csvReport, writeSidecars, canWriteFolder, download } from './export.js';
 import { sampleShoot } from './sample.js';
+import { recordDecision, learnedWeights, decisionCount, forgetDecisions } from './learn.js';
+import { reviewSettings, saveReviewSettings, closeCalls, reviewStack } from './review.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -105,7 +107,7 @@ async function load(list, name) {
   const secs = Math.max(1, Math.round((performance.now() - t0) / 1000));
   $('#shootMeta').textContent = `${photos.length} photos · analysed in ${fmtDur(secs)}`;
   $('#exportBtn').disabled = false; $('#applyStyle').disabled = false;
-  groups = cull(photos, settings);
+  groups = cull(photos, settings, learnedWeights());
   ui.sel = visible()[0]?.id ?? null;
   render();
   const skipped = files.length - photos.length;
@@ -115,7 +117,7 @@ const fmtDur = (s) => (s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`);
 
 function recull() {
   if (!photos.length || analysing) return;
-  groups = cull(photos, settings);
+  groups = cull(photos, settings, learnedWeights());
   render();
   if (ui.loupe) drawLoupe();
 }
@@ -211,6 +213,11 @@ function updateCounts() {
   $('#reasons').innerHTML = keys.length
     ? keys.sort((a, b) => reasons[b].n - reasons[a].n).map((k) => `<li data-r="${k}" class="${ui.reason === k ? 'on' : ''}">${reasons[k].t}<b>${reasons[k].n}</b></li>`).join('')
     : `<li class="muted">${n ? 'No problems found' : 'Nothing yet'}</li>`;
+  const nd = decisionCount(), lw = learnedWeights();
+  $('#learnText').textContent = lw
+    ? `Scoring is tuned to ${nd} of your decisions. Focus ${pct(lw.sharp)}, composition ${pct(lw.aesthetic)}, eyes ${pct(lw.eyes)}, exposure ${pct(lw.exposure)}, expression ${pct(lw.expression)}.`
+    : `Override a few picks and rejects (${nd} so far, at least 3 of each needed) and CullCraft re-weights its scoring to match your taste.`;
+  $('#reviewBtn').disabled = !photos.length || analysing;
   const ns = styleInfo();
   $('#styleText').textContent = ns
     ? `Learned from ${ns} photo${ns > 1 ? 's' : ''} you edited by hand. Auto-edit applies it on top of exposure and white-balance correction.`
@@ -250,11 +257,40 @@ $('#applyStyle').onclick = () => {
   toast(`Edited ${n} pick${n === 1 ? '' : 's'}${styleInfo() ? ' in your style' : ' with auto-correction'}.`);
   if (ui.loupe) drawLoupe();
 };
+$('#relearn').onclick = () => { recull(); toast(learnedWeights() ? 'Re-culled using weights learned from your decisions.' : 'Not enough decisions yet: override at least 3 picks and 3 rejects.'); };
+$('#forgetLearn').onclick = () => { forgetDecisions(); recull(); toast('Forgot your culling decisions. Using default weights.'); };
+
+// ---------------- optional AI close-call review ----------------
+$('#orKey').value = reviewSettings.key; $('#orModel').value = reviewSettings.model;
+$('#orKey').onchange = (e) => { reviewSettings.key = e.target.value.trim(); saveReviewSettings(); };
+$('#orModel').onchange = (e) => { reviewSettings.model = e.target.value.trim() || 'google/gemini-2.5-flash'; saveReviewSettings(); };
+$('#reviewBtn').onclick = async () => {
+  if (!reviewSettings.key) return toast('Paste your OpenRouter API key first.');
+  const calls = closeCalls(photos, groups);
+  if (!calls.length) return toast('No close calls: every stack has a clear winner.');
+  const btn = $('#reviewBtn'); btn.disabled = true;
+  let changed = 0, done = 0, failed = 0, lastErr = '';
+  for (const stack of calls) {
+    progress(`AI reviewing close calls ${done + 1} of ${calls.length}`, `${stack.length} contenders · ${reviewSettings.model}`, done / calls.length);
+    try {
+      const { best, reason } = await reviewStack(stack);
+      const before = stack.find((p) => p.aiFlag === 'pick');
+      stack.forEach((p) => { p.reviewPick = p === best; p.reviewNote = p === best ? reason : null; });
+      if (before !== best) changed++;
+    } catch (err) { failed++; lastErr = err.message; if (/key/i.test(err.message)) break; }
+    done++;
+  }
+  hideProgress(); btn.disabled = false;
+  recull();
+  toast(failed && failed === done ? `Review failed: ${lastErr}` : `Reviewed ${done - failed} close call${done - failed === 1 ? '' : 's'}; changed the pick in ${changed}.${failed ? ` ${failed} failed: ${lastErr}` : ''}`);
+};
+
 $('#resetStyle').onclick = () => { resetStyle(); updateCounts(); toast('Learned style cleared.'); };
 
 // ---------------- flags ----------------
 function setFlag(p, f) {
   p.userFlag = p.flag === f && p.userFlag !== undefined ? undefined : f;   // pressing again hands back to the AI decision
+  recordDecision(p);
   afterChange(p);
 }
 function setStars(p, n) { p.userStars = n; afterChange(p); }
@@ -268,7 +304,7 @@ function afterChange(p) {
 // ---------------- keyboard ----------------
 addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { if (!$('#exportMenu').hidden) $('#exportMenu').hidden = true; else if (ui.loupe) closeLoupe(); return; }
-  if (e.target.matches('input[type=range], input[type=text]') || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.target.matches('input[type=range], input[type=text], input[type=password]') || e.metaKey || e.ctrlKey || e.altKey) return;
   const vis = visible(), idx = vis.findIndex((p) => p.id === ui.sel), p = vis[idx];
   if (!p) return;
   const go = (d) => { const n = vis[Math.max(0, Math.min(vis.length - 1, idx + d))]; if (n && n.id !== ui.sel) { select(n.id); if (ui.loupe) drawLoupe(); } };
@@ -280,7 +316,7 @@ addEventListener('keydown', (e) => {
     case 'p': setFlag(p, 'pick'); go(1); break;
     case 'x': setFlag(p, 'reject'); go(1); break;
     case 'd': setFlag(p, 'dupe'); go(1); break;
-    case 'u': p.userFlag = undefined; p.userStars = undefined; afterChange(p); break;
+    case 'u': p.userFlag = undefined; p.userStars = undefined; recordDecision(p); afterChange(p); break;
     case '0': case '1': case '2': case '3': case '4': case '5': setStars(p, +e.key); break;
     case 'enter': case ' ': ui.loupe ? closeLoupe() : openLoupe(); break;
     case 'c': ui.compare = !ui.compare; ui.loupe ? drawLoupe() : openLoupe(); break;
@@ -404,6 +440,8 @@ function inspector(p, keepSliders) {
     : p.flag === 'dupe' ? `#${p.rankInGroup + 1} of ${g.length} similar shots`
     : p.flag === 'reject' ? 'Rejected' : 'Not flagged';
   $('#vText').textContent = verdict + (p.userFlag !== undefined ? ' · your call' : '');
+  $('#reviewNote').hidden = !p.reviewNote;
+  $('#reviewNote').textContent = p.reviewNote ? `AI reviewer chose this frame: ${p.reviewNote}` : '';
   $('#issues').innerHTML = p.issues.length ? p.issues.map((i) => `<span class="chip">${i.t}</span>`).join('') : '<span class="chip ok">No technical problems</span>';
   $('#parts').innerHTML = Object.keys(PART_LABEL).map((k) => {
     const v = p.parts[k];
