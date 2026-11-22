@@ -24,7 +24,7 @@ document.addEventListener('drop', (e) => { e.preventDefault(); load(e.dataTransf
 
 async function load(fileList) {
   const files = [...fileList].filter((f) => /image\/(jpeg|png|webp)/.test(f.type));
-  if (!files.length) return alert('No JPEG/PNG/WebP files found. (RAW files are not supported in the browser — export JPEG previews first.)');
+  if (!files.length) return toast('No JPEG/PNG/WebP files found. (RAW files are not supported in the browser — export JPEG previews first.)');
   photos.length = 0;
   const useFaces = $('#faceToggle').checked;
   if (useFaces && !faceLandmarker) await initFaces();
@@ -377,14 +377,14 @@ $('#resetBtn').onclick = () => { const p = visible()[sel]; p.edit = null; p.manu
 $('#applyStyle').onclick = () => {
   let n = 0;
   for (const p of photos) if (p.flag === 'pick' && !p.manual) { p.edit = styledParams(p); n++; }
-  alert(`Auto-edited ${n} pick(s)${learnedStyle() ? ' using your learned style' : ''}.`);
+  toast(`Auto-edited ${n} pick(s)${learnedStyle() ? ' using your learned style' : ''}.`);
   if (inLoupe) drawLoupe();
 };
 
 // ---------------- export ----------------
 $('#exportBtn').onclick = async () => {
   const picks = photos.filter((p) => p.flag === 'pick');
-  if (!picks.length) return alert('No picks to export.');
+  if (!picks.length) return toast('No picks to export.');
   const zip = new JSZip(), c = document.createElement('canvas');
   const csv = ['file,flag,stars,score,issues'];
   for (const p of photos) csv.push(`"${p.name}",${p.flag || ''},${p.stars},${p.an.score.toFixed(3)},"${p.an.issues.join('; ')}"`);
@@ -412,3 +412,11 @@ function showProgress(i, n, label) {
   $('#progress .label').textContent = `${label} ${i}/${n}`;
 }
 function hideProgress() { $('#progress').hidden = true; }
+
+// In-page message (browser alert() dialogs are blocked in some embeds).
+function toast(msg) {
+  let t = document.getElementById('toast');
+  if (!t) { t = document.createElement('div'); t.id = 'toast'; document.body.appendChild(t); }
+  t.textContent = msg; t.hidden = false;
+  clearTimeout(toast.h); toast.h = setTimeout(() => (t.hidden = true), 4000);
+}
