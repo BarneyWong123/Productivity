@@ -60,6 +60,15 @@ export function cull(photos, settings, weights) {
     const openCount = (p) => mainFaces(p.an.faces).filter((f) => !f.closed).length;
     const bestOpen = Math.max(0, ...g.map(openCount));
     const mostFaces = Math.max(0, ...g.map((p) => mainFaces(p.an.faces).length));
+    // Focus relative to the sharpest frame of this same moment, so that between two
+    // "sharp enough" frames the genuinely sharper one still wins.
+    const focusOf = (p) => {
+      const f = mainFaces(p.an.faces);
+      if (!f.length) return p.an.tileSharp;
+      const w = f.reduce((s, x) => s + x.size, 0);
+      return f.reduce((s, x) => s + x.eyeSharp * x.size, 0) / w;
+    };
+    const bestFocus = Math.max(1e-6, ...g.map(focusOf));
 
     for (const p of g) {
       const a = p.an, faces = mainFaces(a.faces);
@@ -73,7 +82,7 @@ export function cull(photos, settings, weights) {
       } else focusRatio = a.tileSharp / tileMed;
 
       const parts = {
-        sharp: clamp01((focusRatio - 0.25) / 0.95),
+        sharp: 0.5 * clamp01((focusRatio - 0.25) / 0.95) + 0.5 * Math.pow(focusOf(p) / bestFocus, 1.5),
         exposure: clamp01(1 - Math.abs(a.mean - 0.46) * 2.2 - a.clipHi * 5 - a.clipLo * 3),
         eyes: faces.length ? faces.filter((f) => !f.closed).length / faces.length : null,
         // More people looking good in the frame beats fewer, within the same moment.
