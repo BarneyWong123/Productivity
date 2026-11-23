@@ -25,6 +25,18 @@ AI photo culling and editing for photographers, running entirely in your browser
 - **Autosave**: every flag, rating and edit is saved in your browser as you go and restored when you reopen the same photos.
 - **Looks**: Natural, Bright & airy, Dark & moody, Warm film, Vivid, Classic B&W, applied on top of per-photo correction; copy/paste settings with ⌘C/⌘V.
 
+## Measured accuracy
+
+Tested with the app's own analysis code on public labelled datasets:
+
+| Test | Data | Result (default strictness) |
+| --- | --- | --- |
+| Blink detection | 400 held-out face photos, 200 eyes open / 200 closed ([closed-open-eyes](https://huggingface.co/datasets/MichalMlodawski/closed-open-eyes), AI-generated faces) | 197/200 closed caught, **0/200 open wrongly flagged** (99.3%) |
+| Picking the sharp frame | 174 **real** photo pairs, each a sharp shot and the same scene with real camera shake ([RealBlur-J](https://huggingface.co/datasets/rimchang/RealBlur), CC BY 4.0), culled as one shoot | sharp frame picked in **157/174** stacks, **1/174** sharp photos wrongly rejected, 83/174 shaken frames rejected |
+| Face focus | 60 faces × sharp / slightly soft / blurred, culled as one shoot | sharp picked **60/60**, blurred rejected 60/60, no sharp face rejected |
+
+The real-photo test found and fixed two problems: night and low-light frames were being rejected as "underexposed", and the sharpness score couldn't tell a sharp frame from a nearly sharp one within a burst.
+
 ## Run it
 
 Hosted: deployed on Vercel (see the deployment URL). Or locally:

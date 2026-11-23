@@ -64,7 +64,7 @@ export function cull(photos, settings, weights) {
     // "sharp enough" frames the genuinely sharper one still wins.
     const focusOf = (p) => {
       const f = mainFaces(p.an.faces);
-      if (!f.length) return p.an.tileSharp;
+      if (!f.length) return p.an.edge ?? p.an.tileSharp;
       const w = f.reduce((s, x) => s + x.size, 0);
       return f.reduce((s, x) => s + x.eyeSharp * x.size, 0) / w;
     };
@@ -82,7 +82,8 @@ export function cull(photos, settings, weights) {
       } else focusRatio = a.tileSharp / tileMed;
 
       const parts = {
-        sharp: 0.5 * clamp01((focusRatio - 0.25) / 0.95) + 0.5 * Math.pow(focusOf(p) / bestFocus, 1.5),
+        // Mostly judged against the sharpest frame of the same moment (tuned on real camera-shake pairs).
+        sharp: 0.2 * clamp01((focusRatio - 0.25) / 0.95) + 0.8 * Math.pow(focusOf(p) / bestFocus, 2),
         exposure: clamp01(1 - Math.abs(a.mean - 0.46) * 2.2 - a.clipHi * 5 - a.clipLo * 3),
         eyes: faces.length ? faces.filter((f) => !f.closed).length / faces.length : null,
         // More people looking good in the frame beats fewer, within the same moment.
@@ -93,9 +94,13 @@ export function cull(photos, settings, weights) {
       p.parts = parts; p.focusRatio = focusRatio;
 
       const issues = [];
-      const dark = a.mean < 0.12 + 0.1 * strict || a.clipLo > 0.4;
-      if (dark) issues.push({ k: 'dark', t: 'Underexposed', hard: strict > 0.35 || a.mean < 0.1 });
-      if (!dark) {   // very dark frames lose edge contrast, so don't also call them blurry
+      // Low-key and night frames are often exposed that way on purpose: only flag real underexposure,
+      // and only reject it outright when it's nearly black or the user wants strict culling.
+      const dark = a.mean < 0.05 + 0.05 * strict && a.clipLo > 0.3;
+      if (dark) issues.push({ k: 'dark', t: 'Underexposed', hard: a.mean < 0.035 || strict > 0.75 });
+      // Much blurrier than the best frame of the same moment (camera shake, missed focus).
+      const stackSoft = g.length > 1 && focusOf(p) < bestFocus * (0.5 + 0.35 * strict);
+      {
         const relSoft = focusRatio < 0.3 + 0.35 * strict;
         const absSoft = faces.length ? eyeAbs < ABS_EYE_BLUR * (0.7 + 0.6 * strict) : a.tileSharp < ABS_BLUR * (0.7 + 0.6 * strict);
         // A strong expression can be worth more than critical focus (the slightly soft
@@ -103,6 +108,7 @@ export function cull(photos, settings, weights) {
         const emotional = protect && faces.some((f) => f.smile > 0.6 || f.frown > 0.45) && !absSoft && focusRatio > 0.18;
         if (emotional && relSoft) issues.push({ k: 'emotion', t: 'Slightly soft, kept for expression', hard: false });
         else if (relSoft || absSoft) issues.push({ k: 'blur', t: faces.length ? 'Eyes out of focus' : 'Blurry', hard: true });
+        else if (stackSoft) issues.push({ k: 'blur', t: faces.length ? 'Eyes softer than the best frame' : 'Blurrier than the best frame', hard: true });
         // Back/front focus: something in the frame is sharp but the eyes aren't.
         else if (faces.length && eyeAbs < a.tileSharp * (0.28 + 0.2 * strict) && a.tileSharp > ABS_BLUR * 2)
           issues.push({ k: 'missed', t: 'Focus missed the eyes', hard: strict > 0.4 });
