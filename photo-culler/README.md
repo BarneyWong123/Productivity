@@ -8,7 +8,6 @@ AI photo culling and editing for photographers, running entirely in your browser
 - **Reads RAW.** Sony ARW, Nikon NEF, Canon CR2, Adobe DNG, Pentax PEF and more, via the full-size preview embedded in the RAW file. RAW+JPEG pairs are collapsed to the RAW.
 - **Fast review.** Keyboard-driven grid and full-screen viewer, side-by-side compare with the best of the stack, face/eye overlay, and score breakdown.
 - **Learns your culling taste.** Every pick/reject you override is recorded; a small logistic-regression model re-weights focus, composition, eyes, exposure and expression to match your decisions (kept in your browser, grows with every shoot).
-- **Optional AI review of close calls.** For stacks where the top frames score within a few points, a vision LLM (any OpenRouter model, your own key) picks the winner and explains why. Only those contenders are sent, as 512px previews.
 - **Learns your editing style.** Edit a few photos by hand; CullCraft records how your edits differ from its own auto-correction and applies that look to every pick.
 - **Exports to Lightroom.** `.xmp` sidecars with star ratings, colour labels (green pick, yellow duplicate, red reject) and develop settings, a ZIP of your picks, and a CSV report.
 
@@ -48,7 +47,7 @@ The first shoot you open downloads the AI models (~95 MB) once; after that they'
 | Composition / appeal, scene similarity | CLIP ViT-B/32 (zero-shot, quantised) | OpenAI weights via Xenova/transformers.js |
 | Focus, exposure, duplicates | Measured directly (Laplacian, histogram, perceptual hash) | — |
 
-Neither model was trained specifically to cull photos. Their outputs are combined with weights that start from sensible defaults (`cull.js`) and are re-learned from your own decisions (`learn.js`). The optional close-call reviewer (`review.js`) uses a general vision LLM via OpenRouter.
+Neither model was trained specifically to cull photos. Their outputs are combined with weights that start from sensible defaults (`cull.js`) and are re-learned from your own decisions (`learn.js`).
 
 ## Keyboard
 
@@ -79,4 +78,4 @@ Neither model was trained specifically to cull photos. Their outputs are combine
 
 ## Files
 
-`app.js` UI · `analyze.js` pixel metrics and faces · `ai.js` CLIP · `cull.js` scoring and stacks · `edit.js` editing and style learning · `export.js` XMP/ZIP/CSV · `raw.js` RAW previews · `sample.js` demo shoot · `learn.js` taste learning · `review.js` OpenRouter close-call review · `persist.js` autosave
+`app.js` UI · `analyze.js` pixel metrics and faces · `ai.js` CLIP · `cull.js` scoring and stacks · `edit.js` editing and style learning · `export.js` XMP/ZIP/CSV · `raw.js` RAW previews · `sample.js` demo shoot · `learn.js` taste learning · `persist.js` autosave

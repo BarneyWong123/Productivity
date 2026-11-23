@@ -8,7 +8,6 @@ import { exportZip, csvReport, writeSidecars, canWriteFolder, download } from '.
 import { sampleShoot } from './sample.js';
 import { recordDecision, learnedWeights, decisionCount, forgetDecisions } from './learn.js';
 import { restore, remember, onSave } from './persist.js';
-import { reviewSettings, saveReviewSettings, closeCalls, reviewStack } from './review.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -142,7 +141,6 @@ function visible() {
   if (ui.people !== 'any') list = list.filter((p) => (ui.people === '0' ? peopleIn(p) === 0 : peopleIn(p) >= +ui.people));
   if (ui.by === 'you') list = list.filter((p) => p.userFlag !== undefined || p.userStars !== undefined);
   else if (ui.by === 'ai') list = list.filter((p) => p.userFlag === undefined);
-  else if (ui.by === 'review') list = list.filter((p) => p.reviewPick);
   const by = { score: (x, y) => y.score - x.score, stars: (x, y) => y.stars - x.stars || y.score - x.score, name: (x, y) => x.name.localeCompare(y.name, undefined, { numeric: true }) }[ui.sort];
   if (by) list = [...list].sort(by);
   if (settings.collapse && !filtersActive()) {
@@ -292,7 +290,6 @@ function updateCounts() {
   $('#learnText').textContent = lw
     ? `Scoring is tuned to ${nd} of your decisions. Focus ${pct(lw.sharp)}, composition ${pct(lw.aesthetic)}, eyes ${pct(lw.eyes)}, exposure ${pct(lw.exposure)}, expression ${pct(lw.expression)}.`
     : `Override a few picks and rejects (${nd} so far, at least 3 of each needed) and CullCraft re-weights its scoring to match your taste.`;
-  $('#reviewBtn').disabled = !photos.length || analysing;
   const ns = styleInfo();
   $('#styleText').textContent = ns
     ? `Learned from ${ns} photo${ns > 1 ? 's' : ''} you edited by hand. Auto-edit applies it on top of exposure and white-balance correction.`
@@ -355,31 +352,6 @@ $('#applyStyle').onclick = () => {
 };
 $('#relearn').onclick = () => { recull(); toast(learnedWeights(GENRES[settings.genre].weights) ? 'Re-culled using weights learned from your decisions.' : 'Not enough decisions yet: override at least 3 picks and 3 rejects.'); };
 $('#forgetLearn').onclick = () => { forgetDecisions(); recull(); toast('Forgot your culling decisions. Using default weights.'); };
-
-// ---------------- optional AI close-call review ----------------
-$('#orKey').value = reviewSettings.key; $('#orModel').value = reviewSettings.model;
-$('#orKey').onchange = (e) => { reviewSettings.key = e.target.value.trim(); saveReviewSettings(); };
-$('#orModel').onchange = (e) => { reviewSettings.model = e.target.value.trim() || 'google/gemini-2.5-flash'; saveReviewSettings(); };
-$('#reviewBtn').onclick = async () => {
-  if (!reviewSettings.key) return toast('Paste your OpenRouter API key first.');
-  const calls = closeCalls(photos, groups);
-  if (!calls.length) return toast('No close calls: every stack has a clear winner.');
-  const btn = $('#reviewBtn'); btn.disabled = true;
-  let changed = 0, done = 0, failed = 0, lastErr = '';
-  for (const stack of calls) {
-    progress(`AI reviewing close calls ${done + 1} of ${calls.length}`, `${stack.length} contenders · ${reviewSettings.model}`, done / calls.length);
-    try {
-      const { best, reason } = await reviewStack(stack);
-      const before = stack.find((p) => p.aiFlag === 'pick');
-      stack.forEach((p) => { p.reviewPick = p === best; p.reviewNote = p === best ? reason : null; remember(p); });
-      if (before !== best) changed++;
-    } catch (err) { failed++; lastErr = err.message; if (/key/i.test(err.message)) break; }
-    done++;
-  }
-  hideProgress(); btn.disabled = false;
-  recull();
-  toast(failed && failed === done ? `Review failed: ${lastErr}` : `Reviewed ${done - failed} close call${done - failed === 1 ? '' : 's'}; changed the pick in ${changed}.${failed ? ` ${failed} failed: ${lastErr}` : ''}`);
-};
 
 $('#resetStyle').onclick = () => { resetStyle(); updateCounts(); toast('Learned style cleared.'); };
 
@@ -680,8 +652,6 @@ function inspector(p, keepSliders) {
     : p.flag === 'dupe' ? `#${p.rankInGroup + 1} of ${g.length} similar shots`
     : p.flag === 'reject' ? 'Rejected' : 'Not flagged';
   $('#vText').textContent = verdict + (p.userFlag !== undefined ? ' · your call' : '');
-  $('#reviewNote').hidden = !p.reviewNote;
-  $('#reviewNote').textContent = p.reviewNote ? `AI reviewer chose this frame: ${p.reviewNote}` : '';
   $('#issues').innerHTML = p.issues.length ? p.issues.map((i) => `<span class="chip">${i.t}</span>`).join('') : '<span class="chip ok">No technical problems</span>';
   $('#parts').innerHTML = Object.keys(PART_LABEL).map((k) => {
     const v = p.parts[k];

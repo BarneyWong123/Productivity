@@ -99,13 +99,6 @@
       </div>
     </section>
     <section>
-      <h3>AI review of close calls <span class="opt">optional</span></h3>
-      <p class="fine">When the top frames of a stack score within a few points, a vision model picks the winner. Only those frames are sent, as small previews, using your own OpenRouter key.</p>
-      <div class="field"><label for="orKey">OpenRouter API key</label><input id="orKey" type="password" placeholder="sk-or-…" autocomplete="off" /></div>
-      <div class="field"><label for="orModel">Model</label><input id="orModel" type="text" spellcheck="false" /></div>
-      <button id="reviewBtn" class="btn small" disabled>Review close calls</button>
-    </section>
-    <section>
       <h3>Your editing style</h3>
       <p class="fine" id="styleText"></p>
       <div class="row">
@@ -128,7 +121,7 @@
       <label>Rating <select id="fb-rating"><option value="any">Any</option><option value=">5">★★★★★</option><option value=">4">★★★★ and up</option><option value=">3">★★★ and up</option><option value=">2">★★ and up</option><option value="<2">★★ and below</option><option value="rated">Rated by you</option><option value="unrated">Not rated by you</option></select></label>
       <label>Edited <select id="fb-edited"><option value="any">Any</option><option value="yes">Edited</option><option value="hand">Hand-edited</option><option value="no">Not edited</option></select></label>
       <label>People <select id="fb-people"><option value="any">Any</option><option value="0">No people</option><option value="1">1 or more</option><option value="2">2 or more</option><option value="3">Groups (3+)</option></select></label>
-      <label>Decided by <select id="fb-by"><option value="any">Anyone</option><option value="you">You</option><option value="ai">AI</option><option value="review">AI close-call review</option></select></label>
+      <label>Decided by <select id="fb-by"><option value="any">Anyone</option><option value="you">You</option><option value="ai">AI</option></select></label>
       <label>Problem <select id="fb-reason"><option value="">Any problem</option></select></label>
       <label>Sort <select id="fb-sort"><option value="time">Capture time</option><option value="score">AI score</option><option value="stars">Rating</option><option value="name">File name</option></select></label>
       <button id="fbClear" class="btn small ghost" hidden>Clear filters</button>
@@ -190,7 +183,6 @@
           <svg class="ring" viewBox="0 0 40 40"><circle cx="20" cy="20" r="17" class="track"/><circle id="ringVal" cx="20" cy="20" r="17" class="val"/></svg>
           <div><div id="vScore" class="vscore"></div><div id="vText" class="vtext"></div></div>
         </div>
-        <p id="reviewNote" class="note" hidden></p>
         <div id="issues" class="chips"></div>
         <dl id="parts" class="parts"></dl>
         <h4>Histogram</h4>

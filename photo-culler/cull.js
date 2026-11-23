@@ -120,8 +120,7 @@ export function cull(photos, settings, weights) {
       p.group = gi; p.rankInGroup = r;
       p.aiFlag = p.issues.some((x) => x.hard) ? 'reject' : 'dupe';
     });
-    // A close-call verdict from the optional AI reviewer overrides the score ranking.
-    const best = ranked.find((p) => p.reviewPick && p.aiFlag !== 'reject') || ranked.find((p) => p.aiFlag !== 'reject');
+    const best = ranked.find((p) => p.aiFlag !== 'reject');
     if (best) best.aiFlag = 'pick';
     // Strict mode: in a stack, frames far behind the winner are rejects rather than duplicates.
     if (best && strict >= 0.7) for (const p of ranked) if (p.aiFlag === 'dupe' && best.score - p.score > 0.25 - 0.15 * strict) { p.aiFlag = 'reject'; p.issues.push({ k: 'weaker', t: 'Clearly weaker than the pick', hard: true }); }
